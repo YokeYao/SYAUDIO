@@ -1,0 +1,10 @@
+# Large audio assets
+audio_samples/
+benchmark/GSM8K/audio/
+benchmark/MMLU/audio/
+benchmark/MMAR/audio/
+benchmark/MMAU/test-mini-audios/
+
+# Python cache
+__pycache__/
+*.pyc
