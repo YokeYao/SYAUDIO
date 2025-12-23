@@ -600,7 +600,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen2.5-Omni-7B",
+        default="Qwen/Qwen2-Audio-7B-Instruct",
         help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-audio-mini, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
     )
     parser.add_argument(
