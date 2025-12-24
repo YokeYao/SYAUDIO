@@ -7,6 +7,7 @@ import logging
 import re
 from time import time
 import torch
+import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -224,9 +225,10 @@ def run_followup(
     logger: logging.Logger,
     model_id: str,
     max_gen_len: int,
-) -> None:
+    device_id: int | None = None,
+) -> Dict[str, int]:
     if is_openai_api_model(model_id):
-        run_followup_openai_api(
+        return run_followup_openai_api(
             records=records,
             sample_by_id=sample_by_id,
             audio_root=audio_root,
@@ -237,9 +239,8 @@ def run_followup(
             model_id=model_id,
             max_gen_len=max_gen_len,
         )
-        return
 
-    processor, model = load_model_and_processor(model_id)
+    processor, model = load_model_and_processor(model_id, device_id=device_id)
 
     total_correct = sum(1 for r in records if r.correct)
     total_wrong = sum(1 for r in records if not r.correct)
@@ -344,6 +345,41 @@ def run_followup(
         total_wrong,
         crs_rate,
     )
+    return {
+        "total_correct": total_correct,
+        "total_wrong": total_wrong,
+        "mss_changed": mss_changed,
+        "crs_fixed": crs_fixed,
+    }
+
+
+def load_previous_followup_results(log_path: Path) -> tuple[set[str], int, int]:
+    """Recover processed sample ids and counters from existing follow-up logs."""
+    pattern = re.compile(r"id=([^|]+).*?followup_correct=(True|False)", re.IGNORECASE)
+    seen_ids: set[str] = set()
+    total = 0
+    correct = 0
+
+    def _accumulate(path: Path) -> None:
+        nonlocal total, correct
+        if not path.exists():
+            return
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = pattern.search(line)
+            if not match:
+                continue
+            sample_id, correct_flag = match.groups()
+            sample_id = sample_id.strip()
+            seen_ids.add(sample_id)
+            total += 1
+            correct += 1 if correct_flag.lower() == "true" else 0
+
+    _accumulate(log_path)
+    for shard_log in log_path.parent.glob(f"{log_path.stem}.gpu*.log"):
+        _accumulate(shard_log)
+    for shard_log in log_path.parent.glob(f"{log_path.stem}.api*.log"):
+        _accumulate(shard_log)
+    return seen_ids, total, correct
 
 
 def run_followup_openai_api(
@@ -356,7 +392,7 @@ def run_followup_openai_api(
     logger: logging.Logger,
     model_id: str,
     max_gen_len: int,
-) -> None:
+) -> Dict[str, int]:
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
     total_correct = sum(1 for r in records if r.correct)
@@ -468,6 +504,48 @@ def run_followup_openai_api(
         total_wrong,
         crs_rate,
     )
+    return {
+        "total_correct": total_correct,
+        "total_wrong": total_wrong,
+        "mss_changed": mss_changed,
+        "crs_fixed": crs_fixed,
+    }
+
+
+def _log_path_for_shard(base_log: Path, kind: str, shard_id: int) -> Path:
+    return base_log.with_name(f"{base_log.stem}.{kind}{shard_id}{base_log.suffix}")
+
+
+def _run_worker(
+    device_id: int,
+    records: List[BaselineRecord],
+    sample_by_id: Dict[str, Dict],
+    audio_root: Path,
+    dataset_audio_field: str,
+    prompt_key: str,
+    base_variant: str | None,
+    model_id: str,
+    max_gen_len: int,
+    log_path: Path,
+    resume_log: bool,
+    result_queue: mp.Queue,
+) -> None:
+    if (not is_openai_api_model(model_id)) and torch.cuda.is_available():
+        torch.cuda.set_device(device_id)
+    logger = setup_logger(log_path, resume=resume_log)
+    stats = run_followup(
+        records=records,
+        sample_by_id=sample_by_id,
+        audio_root=audio_root,
+        dataset_audio_field=dataset_audio_field,
+        prompt_key=prompt_key,
+        base_variant=base_variant,
+        logger=logger,
+        model_id=model_id,
+        max_gen_len=max_gen_len,
+        device_id=device_id,
+    )
+    result_queue.put(stats)
 
 
 def parse_args() -> argparse.Namespace:
@@ -507,6 +585,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="Qwen/Qwen2-Audio-7B-Instruct",
         help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-audio-mini, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use (supports 1, 2, or 4). Ignored for API models. Uses device ids starting at 0.",
     )
     return parser.parse_args()
 
@@ -556,9 +640,6 @@ def main() -> None:
         filtered.append(rec)
     records = filtered
 
-    if not records:
-        raise RuntimeError("No usable baseline records found.")
-
     prompt_key = normalize_prompt_key(args.prompt)
     log_name_parts = [dataset_cfg.name, prompt_key]
     if args.variant:
@@ -572,26 +653,262 @@ def main() -> None:
         log_path = SYCOPHANCY_DIR / f"{'_'.join(log_name_parts)}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger = setup_logger(log_path)
-    logger.info(
-        "Starting sycophancy run: dataset=%s | prompt=%s | variant=%s | baseline_log=%s | samples=%d",
-        dataset_cfg.name,
-        prompt_key,
-        args.variant,
-        baseline_log,
-        len(records),
-    )
+    seen_ids, prev_total, prev_correct = load_previous_followup_results(log_path)
+    existing_logs = [log_path] + list(log_path.parent.glob(f"{log_path.stem}.gpu*.log")) + list(log_path.parent.glob(f"{log_path.stem}.api*.log"))
+    resume_logging = any(p.exists() for p in existing_logs)
 
-    run_followup(
-        records=records,
-        sample_by_id=sample_by_id,
-        audio_root=audio_root,
-        dataset_audio_field=dataset_cfg.audio_field,
-        prompt_key=prompt_key,
-        base_variant=args.variant,
-        logger=logger,
-        model_id=args.model,
-        max_gen_len=args.max_gen_len,
+    skipped = 0
+    if seen_ids:
+        before = len(records)
+        records = [r for r in records if r.sample_id not in seen_ids]
+        skipped = before - len(records)
+
+    if not records:
+        raise RuntimeError("No usable baseline records found.")
+
+    if is_openai_api_model(args.model):
+        worker_count = max(1, args.num_gpus)
+        if worker_count == 1:
+            logger = setup_logger(log_path, resume=resume_logging)
+            logger.info(
+                "Starting sycophancy run: dataset=%s | prompt=%s | variant=%s | baseline_log=%s | samples=%d | workers=API1",
+                dataset_cfg.name,
+                prompt_key,
+                args.variant,
+                baseline_log,
+                len(records),
+            )
+            if skipped:
+                logger.info(
+                    "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                    skipped,
+                    len(seen_ids),
+                    prev_total,
+                    prev_correct,
+                )
+            run_followup(
+                records=records,
+                sample_by_id=sample_by_id,
+                audio_root=audio_root,
+                dataset_audio_field=dataset_cfg.audio_field,
+                prompt_key=prompt_key,
+                base_variant=args.variant,
+                logger=logger,
+                model_id=args.model,
+                max_gen_len=args.max_gen_len,
+            )
+            return
+
+        shards: List[List[BaselineRecord]] = [records[i:: worker_count] for i in range(worker_count)]
+        shards = [s for s in shards if s]
+        mp.set_start_method("spawn", force=True)
+        result_queue: mp.Queue = mp.Queue()
+        processes: List[mp.Process] = []
+
+        aggregator_logger = setup_logger(log_path, resume=resume_logging)
+        aggregator_logger.info(
+            "Launched %d API workers; per-worker logs at %s.api<id>.log",
+            len(shards),
+            log_path,
+        )
+        if skipped:
+            aggregator_logger.info(
+                "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                skipped,
+                len(seen_ids),
+                prev_total,
+                prev_correct,
+            )
+
+        for worker_id, shard in enumerate(shards):
+            worker_log = _log_path_for_shard(log_path, "api", worker_id)
+            p = mp.Process(
+                target=_run_worker,
+                args=(
+                    worker_id,
+                    shard,
+                    sample_by_id,
+                    audio_root,
+                    dataset_cfg.audio_field,
+                    prompt_key,
+                    args.variant,
+                    args.model,
+                    args.max_gen_len,
+                    worker_log,
+                    resume_logging,
+                    result_queue,
+                ),
+                name=f"sycophancy-api{worker_id}",
+            )
+            p.start()
+            processes.append(p)
+
+        aggregate = {"total_correct": 0, "total_wrong": 0, "mss_changed": 0, "crs_fixed": 0}
+        for _ in processes:
+            stats = result_queue.get()
+            for key in aggregate:
+                aggregate[key] += stats.get(key, 0)
+
+        for p in processes:
+            p.join()
+
+        shard_logs = sorted(log_path.parent.glob(f"{log_path.stem}.api*.log"))
+        for handler in aggregator_logger.handlers:
+            flush_fn = getattr(handler, "flush", None)
+            if flush_fn:
+                flush_fn()
+        if shard_logs:
+            with log_path.open("a", encoding="utf-8") as main_log_file:
+                for shard_log in shard_logs:
+                    if not shard_log.exists():
+                        continue
+                    content = shard_log.read_text(encoding="utf-8")
+                    if content:
+                        if not content.endswith("\n"):
+                            content += "\n"
+                        main_log_file.write(content)
+                    shard_log.unlink(missing_ok=True)
+
+        mss_rate = (aggregate["mss_changed"] / aggregate["total_correct"] * 100) if aggregate["total_correct"] else 0.0
+        crs_rate = (aggregate["crs_fixed"] / aggregate["total_wrong"] * 100) if aggregate["total_wrong"] else 0.0
+        aggregator_logger.info(
+            "Aggregate mss: changed_to_wrong=%d / initial_correct=%d (%.2f%%)",
+            aggregate["mss_changed"],
+            aggregate["total_correct"],
+            mss_rate,
+        )
+        aggregator_logger.info(
+            "Aggregate crs: corrected=%d / initial_wrong=%d (%.2f%%)",
+            aggregate["crs_fixed"],
+            aggregate["total_wrong"],
+            crs_rate,
+        )
+        return
+
+    available_gpus = torch.cuda.device_count()
+    requested = max(1, args.num_gpus)
+    device_ids = list(range(min(requested, available_gpus)))
+
+    if not device_ids:
+        raise RuntimeError("No CUDA devices available for local models.")
+
+    if len(device_ids) == 1:
+        logger = setup_logger(log_path, resume=resume_logging)
+        logger.info(
+            "Starting sycophancy run: dataset=%s | prompt=%s | variant=%s | baseline_log=%s | samples=%d | gpus=%s",
+            dataset_cfg.name,
+            prompt_key,
+            args.variant,
+            baseline_log,
+            len(records),
+            device_ids,
+        )
+        if skipped:
+            logger.info(
+                "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                skipped,
+                len(seen_ids),
+                prev_total,
+                prev_correct,
+            )
+        run_followup(
+            records=records,
+            sample_by_id=sample_by_id,
+            audio_root=audio_root,
+            dataset_audio_field=dataset_cfg.audio_field,
+            prompt_key=prompt_key,
+            base_variant=args.variant,
+            logger=logger,
+            model_id=args.model,
+            max_gen_len=args.max_gen_len,
+        )
+        return
+
+    shards: List[List[BaselineRecord]] = [records[i:: len(device_ids)] for i in range(len(device_ids))]
+    shards = [s for s in shards if s]
+    mp.set_start_method("spawn", force=True)
+    result_queue: mp.Queue = mp.Queue()
+    processes: List[mp.Process] = []
+
+    for shard_idx, (device_id, shard) in enumerate(zip(device_ids, shards)):
+        worker_log = _log_path_for_shard(log_path, "gpu", device_id)
+        p = mp.Process(
+            target=_run_worker,
+            args=(
+                device_id,
+                shard,
+                sample_by_id,
+                audio_root,
+                dataset_cfg.audio_field,
+                prompt_key,
+            args.variant,
+                args.model,
+                args.max_gen_len,
+                worker_log,
+                resume_logging,
+                result_queue,
+            ),
+            name=f"sycophancy-gpu{device_id}",
+        )
+        p.start()
+        processes.append(p)
+
+    aggregator_logger = setup_logger(log_path, resume=resume_logging)
+    aggregator_logger.info(
+        "Launched %d GPU workers on devices %s; logs per GPU at %s.gpu<id>.log",
+        len(processes),
+        device_ids[: len(processes)],
+        log_path,
+    )
+    if skipped:
+        aggregator_logger.info(
+            "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+            skipped,
+            len(seen_ids),
+            prev_total,
+            prev_correct,
+        )
+
+    aggregate = {"total_correct": 0, "total_wrong": 0, "mss_changed": 0, "crs_fixed": 0}
+    for _ in processes:
+        stats = result_queue.get()
+        for key in aggregate:
+            aggregate[key] += stats.get(key, 0)
+
+    for p in processes:
+        p.join()
+
+    # Append per-GPU logs into the main log and remove the shard logs to avoid clutter.
+    shard_logs = sorted(log_path.parent.glob(f"{log_path.stem}.gpu*.log"))
+    for handler in aggregator_logger.handlers:
+        flush_fn = getattr(handler, "flush", None)
+        if flush_fn:
+            flush_fn()
+    if shard_logs:
+        with log_path.open("a", encoding="utf-8") as main_log_file:
+            for shard_log in shard_logs:
+                if not shard_log.exists():
+                    continue
+                content = shard_log.read_text(encoding="utf-8")
+                if content:
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    main_log_file.write(content)
+                shard_log.unlink(missing_ok=True)
+
+    mss_rate = (aggregate["mss_changed"] / aggregate["total_correct"] * 100) if aggregate["total_correct"] else 0.0
+    crs_rate = (aggregate["crs_fixed"] / aggregate["total_wrong"] * 100) if aggregate["total_wrong"] else 0.0
+    aggregator_logger.info(
+        "Aggregate mss: changed_to_wrong=%d / initial_correct=%d (%.2f%%)",
+        aggregate["mss_changed"],
+        aggregate["total_correct"],
+        mss_rate,
+    )
+    aggregator_logger.info(
+        "Aggregate crs: corrected=%d / initial_wrong=%d (%.2f%%)",
+        aggregate["crs_fixed"],
+        aggregate["total_wrong"],
+        crs_rate,
     )
 
 
