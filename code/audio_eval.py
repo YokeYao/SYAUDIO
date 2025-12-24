@@ -682,6 +682,13 @@ def main() -> None:
         samples = [s for s in samples if (s.get("id") or s.get("question_id")) not in processed_ids]
         skipped = before - len(samples)
 
+    if not samples:
+        print(
+            f"No usable samples left after skipping seen ids ({len(processed_ids)});"
+            " assuming baseline already complete."
+        )
+        return
+
     if is_openai_api_model(args.model) or args.num_gpus == 1:
         logger = setup_logger(log_path, resume=resume_logging)
         logger.info(

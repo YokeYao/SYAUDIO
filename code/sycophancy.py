@@ -754,7 +754,12 @@ def main() -> None:
         skipped = before - len(records)
 
     if not records:
-        raise RuntimeError("No usable baseline records found.")
+        # All baseline samples already processed; treat as a no-op so reruns can skip cleanly.
+        print(
+            f"No usable baseline records found after skipping seen ids ({len(seen_ids)});"
+            " assuming run is already complete."
+        )
+        return
 
     if is_openai_api_model(args.model):
         worker_count = max(1, args.num_gpus)
