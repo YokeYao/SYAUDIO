@@ -1,0 +1,4 @@
+[Wed Dec 24 07:43:38 PM +04 2025] Starting runs with model=Qwen/Qwen2-Audio-7B-Instruct, dataset=mmlu, limit=9999, GPUs=2
+[Wed Dec 24 07:43:38 PM +04 2025] Dataset=mmlu | baseline
+No usable samples left after skipping seen ids (1000); assuming baseline already complete.
+[Wed Dec 24 07:43:46 PM +04 2025] Dataset=mmlu | prompt=bias_feedback | variant=strong

@@ -1,7 +1,7 @@
 #!/bin/bash
 # SBATCH script to run Qwen2-Audio-7B-Instruct baseline + 6 sycophancy prompts on four datasets using 4 GPUs.
 
-#SBATCH -J qwen2-audio-split
+#SBATCH -J gpu-all-dataset
 #SBATCH -p cscc-gpu-p
 #SBATCH -q cscc-gpu-qos
 #SBATCH --nodes=1
@@ -22,17 +22,22 @@ cd /home/junchi.yao/ICML2026-ALM
 
 mkdir -p logs
 
-MODEL="Qwen/Qwen2-Audio-7B-Instruct"
+DEFAULT_MODEL="Qwen/Qwen2-Audio-7B-Instruct"
+MODEL="${1:-${DEFAULT_MODEL}}"  # optional positional arg overrides default model
 LIMIT=9999
 NUM_GPUS=2
 # Two-job split to ease queue wait; SLURM_ARRAY_TASK_ID picks the group.
-# 0: mmar + mmau, 1: gsm8k. (mmlu omitted as requested.)
+# 0: mmar + mmau, 1: gsm8k + mmlu
 DATASET_GROUPS=(
-  # "mmar mmau"
-  "mmlu"
+  "mmar mmau"
+  "gsm8k mmlu"
 )
-# Fallback to group 0 if array index missing.
 GROUP_IDX="${SLURM_ARRAY_TASK_ID:-0}"
+# Guard against out-of-range array index
+if (( GROUP_IDX < 0 || GROUP_IDX >= ${#DATASET_GROUPS[@]} )); then
+  echo "Invalid group index ${GROUP_IDX}; defaulting to 0" >&2
+  GROUP_IDX=0
+fi
 IFS=' ' read -r -a DATASETS <<<"${DATASET_GROUPS[$GROUP_IDX]}"
 # prompt entries: "<prompt_key> [variant]" for sycophancy.py
 PROMPTS=(

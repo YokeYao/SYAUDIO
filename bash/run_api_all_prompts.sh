@@ -7,7 +7,8 @@ source ~/.bashrc
 conda activate alm
 cd /home/junchi.yao/ICML2026-ALM
 
-MODEL="vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking"
+DEFAULT_MODEL="vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking"
+MODEL="${1:-${DEFAULT_MODEL}}"  # optional positional arg overrides default model
 LIMIT=9999
 WORKERS=4   # number of API workers (num-gpus flag is repurposed for API parallelism)
 

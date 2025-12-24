@@ -1,0 +1,3 @@
+2025-12-24 19:14:09 | INFO | Launched 2 GPU workers on devices [0, 1]; logs per GPU at /home/junchi.yao/ICML2026-ALM/result/sycophancy/Qwen2-Audio-7B-Instruct/mmlu_bias_feedback_strong.log.gpu<id>.log
+2025-12-24 19:44:03 | INFO | Launched 2 GPU workers on devices [0, 1]; logs per GPU at /home/junchi.yao/ICML2026-ALM/result/sycophancy/Qwen2-Audio-7B-Instruct/mmlu_bias_feedback_strong.log.gpu<id>.log
+2025-12-24 19:44:03 | INFO | Resuming: skipped 500 samples already logged (seen=500, baseline_correct=167, baseline_wrong=333, mss_changed=65, crs_fixed=46)
