@@ -225,6 +225,12 @@ def run_followup(
     logger: logging.Logger,
     model_id: str,
     max_gen_len: int,
+    processed_ids: set[str] | None = None,
+    initial_total_correct: int = 0,
+    initial_total_wrong: int = 0,
+    initial_mss_changed: int = 0,
+    initial_crs_fixed: int = 0,
+    resume: bool = False,
     device_id: int | None = None,
 ) -> Dict[str, int]:
     if is_openai_api_model(model_id):
@@ -238,16 +244,39 @@ def run_followup(
             logger=logger,
             model_id=model_id,
             max_gen_len=max_gen_len,
+            processed_ids=processed_ids,
+            initial_total_correct=initial_total_correct,
+            initial_total_wrong=initial_total_wrong,
+            initial_mss_changed=initial_mss_changed,
+            initial_crs_fixed=initial_crs_fixed,
+            resume=resume,
         )
 
     processor, model = load_model_and_processor(model_id, device_id=device_id)
 
-    total_correct = sum(1 for r in records if r.correct)
-    total_wrong = sum(1 for r in records if not r.correct)
-    mss_changed = 0
-    crs_fixed = 0
+    processed_ids = set(processed_ids or ())
+    total_correct = initial_total_correct
+    total_wrong = initial_total_wrong
+    mss_changed = initial_mss_changed
+    crs_fixed = initial_crs_fixed
+
+    if resume and processed_ids:
+        log_file = getattr(logger.handlers[0], "baseFilename", "") if logger.handlers else ""
+        logger.info(
+            "Resuming: found %d completed samples (baseline_correct=%d, baseline_wrong=%d, mss_changed=%d, crs_fixed=%d) in %s",
+            len(processed_ids),
+            initial_total_correct,
+            initial_total_wrong,
+            initial_mss_changed,
+            initial_crs_fixed,
+            log_file,
+        )
 
     for rec in records:
+        if rec.sample_id in processed_ids:
+            logger.info("Skipping already processed sample id=%s", rec.sample_id)
+            continue
+
         sample = sample_by_id.get(rec.sample_id)
         if not sample:
             logger.warning("Sample %s missing from dataset; skipping", rec.sample_id)
@@ -313,6 +342,8 @@ def run_followup(
         gold_letter = get_answer_letter(sample)
         followup_correct = predicted_letter == gold_letter and gold_letter != ""
 
+        total_correct += int(rec.correct)
+        total_wrong += int(not rec.correct)
         if rec.correct and not followup_correct:
             mss_changed += 1
         if (not rec.correct) and followup_correct:
@@ -353,33 +384,55 @@ def run_followup(
     }
 
 
-def load_previous_followup_results(log_path: Path) -> tuple[set[str], int, int]:
+def load_previous_results(log_path: Path) -> tuple[set[str], int, int, int, int]:
     """Recover processed sample ids and counters from existing follow-up logs."""
-    pattern = re.compile(r"id=([^|]+).*?followup_correct=(True|False)", re.IGNORECASE)
+    pattern = re.compile(
+        r"id=([^|]+)\s*\|\s*baseline_pred=([^|]+)\s*\|\s*gold=([^|]+)\s*\|.*?followup_correct=(True|False)",
+        re.IGNORECASE,
+    )
     seen_ids: set[str] = set()
-    total = 0
-    correct = 0
+    baseline_correct = 0
+    baseline_wrong = 0
+    mss_changed = 0
+    crs_fixed = 0
 
     def _accumulate(path: Path) -> None:
-        nonlocal total, correct
+        nonlocal baseline_correct, baseline_wrong, mss_changed, crs_fixed
         if not path.exists():
             return
         for line in path.read_text(encoding="utf-8").splitlines():
             match = pattern.search(line)
             if not match:
                 continue
-            sample_id, correct_flag = match.groups()
+            sample_id, baseline_pred, gold, followup_flag = match.groups()
             sample_id = sample_id.strip()
             seen_ids.add(sample_id)
-            total += 1
-            correct += 1 if correct_flag.lower() == "true" else 0
+
+            baseline_pred = baseline_pred.strip()
+            gold = gold.strip()
+            followup_correct = followup_flag.lower() == "true"
+
+            pred_letter = baseline_pred if baseline_pred in CHOICE_LETTERS else ""
+            gold_letter = gold if gold in CHOICE_LETTERS else ""
+            if not pred_letter or not gold_letter:
+                continue
+
+            baseline_is_correct = pred_letter == gold_letter
+            if baseline_is_correct:
+                baseline_correct += 1
+                if not followup_correct:
+                    mss_changed += 1
+            else:
+                baseline_wrong += 1
+                if followup_correct:
+                    crs_fixed += 1
 
     _accumulate(log_path)
     for shard_log in log_path.parent.glob(f"{log_path.stem}.gpu*.log"):
         _accumulate(shard_log)
     for shard_log in log_path.parent.glob(f"{log_path.stem}.api*.log"):
         _accumulate(shard_log)
-    return seen_ids, total, correct
+    return seen_ids, baseline_correct, baseline_wrong, mss_changed, crs_fixed
 
 
 def run_followup_openai_api(
@@ -392,15 +445,38 @@ def run_followup_openai_api(
     logger: logging.Logger,
     model_id: str,
     max_gen_len: int,
+    processed_ids: set[str] | None = None,
+    initial_total_correct: int = 0,
+    initial_total_wrong: int = 0,
+    initial_mss_changed: int = 0,
+    initial_crs_fixed: int = 0,
+    resume: bool = False,
 ) -> Dict[str, int]:
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
-    total_correct = sum(1 for r in records if r.correct)
-    total_wrong = sum(1 for r in records if not r.correct)
-    mss_changed = 0
-    crs_fixed = 0
+    processed_ids = set(processed_ids or ())
+    total_correct = initial_total_correct
+    total_wrong = initial_total_wrong
+    mss_changed = initial_mss_changed
+    crs_fixed = initial_crs_fixed
+
+    if resume and processed_ids:
+        log_file = getattr(logger.handlers[0], "baseFilename", "") if logger.handlers else ""
+        logger.info(
+            "Resuming: found %d completed samples (baseline_correct=%d, baseline_wrong=%d, mss_changed=%d, crs_fixed=%d) in %s",
+            len(processed_ids),
+            initial_total_correct,
+            initial_total_wrong,
+            initial_mss_changed,
+            initial_crs_fixed,
+            log_file,
+        )
 
     for rec in records:
+        if rec.sample_id in processed_ids:
+            logger.info("Skipping already processed sample id=%s", rec.sample_id)
+            continue
+
         sample = sample_by_id.get(rec.sample_id)
         if not sample:
             logger.warning("Sample %s missing from dataset; skipping", rec.sample_id)
@@ -472,6 +548,8 @@ def run_followup_openai_api(
         gold_letter = get_answer_letter(sample)
         followup_correct = predicted_letter == gold_letter and gold_letter != ""
 
+        total_correct += int(rec.correct)
+        total_wrong += int(not rec.correct)
         if rec.correct and not followup_correct:
             mss_changed += 1
         if (not rec.correct) and followup_correct:
@@ -528,6 +606,11 @@ def _run_worker(
     max_gen_len: int,
     log_path: Path,
     resume_log: bool,
+    processed_ids: set[str],
+    initial_total_correct: int,
+    initial_total_wrong: int,
+    initial_mss_changed: int,
+    initial_crs_fixed: int,
     result_queue: mp.Queue,
 ) -> None:
     if (not is_openai_api_model(model_id)) and torch.cuda.is_available():
@@ -543,6 +626,12 @@ def _run_worker(
         logger=logger,
         model_id=model_id,
         max_gen_len=max_gen_len,
+        processed_ids=processed_ids,
+        initial_total_correct=initial_total_correct,
+        initial_total_wrong=initial_total_wrong,
+        initial_mss_changed=initial_mss_changed,
+        initial_crs_fixed=initial_crs_fixed,
+        resume=bool(processed_ids),
         device_id=device_id,
     )
     result_queue.put(stats)
@@ -653,9 +742,10 @@ def main() -> None:
         log_path = SYCOPHANCY_DIR / f"{'_'.join(log_name_parts)}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    seen_ids, prev_total, prev_correct = load_previous_followup_results(log_path)
+    seen_ids, prev_total_correct, prev_total_wrong, prev_mss_changed, prev_crs_fixed = load_previous_results(log_path)
     existing_logs = [log_path] + list(log_path.parent.glob(f"{log_path.stem}.gpu*.log")) + list(log_path.parent.glob(f"{log_path.stem}.api*.log"))
     resume_logging = any(p.exists() for p in existing_logs)
+    resume_flag = bool(seen_ids)
 
     skipped = 0
     if seen_ids:
@@ -680,11 +770,13 @@ def main() -> None:
             )
             if skipped:
                 logger.info(
-                    "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                    "Resuming: skipped %d samples already logged (seen=%d, baseline_correct=%d, baseline_wrong=%d, mss_changed=%d, crs_fixed=%d)",
                     skipped,
                     len(seen_ids),
-                    prev_total,
-                    prev_correct,
+                    prev_total_correct,
+                    prev_total_wrong,
+                    prev_mss_changed,
+                    prev_crs_fixed,
                 )
             run_followup(
                 records=records,
@@ -696,6 +788,12 @@ def main() -> None:
                 logger=logger,
                 model_id=args.model,
                 max_gen_len=args.max_gen_len,
+                processed_ids=seen_ids,
+                initial_total_correct=prev_total_correct,
+                initial_total_wrong=prev_total_wrong,
+                initial_mss_changed=prev_mss_changed,
+                initial_crs_fixed=prev_crs_fixed,
+                resume=resume_flag,
             )
             return
 
@@ -713,11 +811,13 @@ def main() -> None:
         )
         if skipped:
             aggregator_logger.info(
-                "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                "Resuming: skipped %d samples already logged (seen=%d, baseline_correct=%d, baseline_wrong=%d, mss_changed=%d, crs_fixed=%d)",
                 skipped,
                 len(seen_ids),
-                prev_total,
-                prev_correct,
+                prev_total_correct,
+                prev_total_wrong,
+                prev_mss_changed,
+                prev_crs_fixed,
             )
 
         for worker_id, shard in enumerate(shards):
@@ -736,6 +836,11 @@ def main() -> None:
                     args.max_gen_len,
                     worker_log,
                     resume_logging,
+                    set(),
+                    0,
+                    0,
+                    0,
+                    0,
                     result_queue,
                 ),
                 name=f"sycophancy-api{worker_id}",
@@ -743,7 +848,12 @@ def main() -> None:
             p.start()
             processes.append(p)
 
-        aggregate = {"total_correct": 0, "total_wrong": 0, "mss_changed": 0, "crs_fixed": 0}
+        aggregate = {
+            "total_correct": prev_total_correct,
+            "total_wrong": prev_total_wrong,
+            "mss_changed": prev_mss_changed,
+            "crs_fixed": prev_crs_fixed,
+        }
         for _ in processes:
             stats = result_queue.get()
             for key in aggregate:
@@ -805,11 +915,13 @@ def main() -> None:
         )
         if skipped:
             logger.info(
-                "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                "Resuming: skipped %d samples already logged (seen=%d, baseline_correct=%d, baseline_wrong=%d, mss_changed=%d, crs_fixed=%d)",
                 skipped,
                 len(seen_ids),
-                prev_total,
-                prev_correct,
+                prev_total_correct,
+                prev_total_wrong,
+                prev_mss_changed,
+                prev_crs_fixed,
             )
         run_followup(
             records=records,
@@ -821,6 +933,12 @@ def main() -> None:
             logger=logger,
             model_id=args.model,
             max_gen_len=args.max_gen_len,
+            processed_ids=seen_ids,
+            initial_total_correct=prev_total_correct,
+            initial_total_wrong=prev_total_wrong,
+            initial_mss_changed=prev_mss_changed,
+            initial_crs_fixed=prev_crs_fixed,
+            resume=resume_flag,
         )
         return
 
@@ -841,11 +959,16 @@ def main() -> None:
                 audio_root,
                 dataset_cfg.audio_field,
                 prompt_key,
-            args.variant,
+                args.variant,
                 args.model,
                 args.max_gen_len,
                 worker_log,
                 resume_logging,
+                set(),
+                0,
+                0,
+                0,
+                0,
                 result_queue,
             ),
             name=f"sycophancy-gpu{device_id}",
@@ -862,14 +985,21 @@ def main() -> None:
     )
     if skipped:
         aggregator_logger.info(
-            "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+            "Resuming: skipped %d samples already logged (seen=%d, baseline_correct=%d, baseline_wrong=%d, mss_changed=%d, crs_fixed=%d)",
             skipped,
             len(seen_ids),
-            prev_total,
-            prev_correct,
+            prev_total_correct,
+            prev_total_wrong,
+            prev_mss_changed,
+            prev_crs_fixed,
         )
 
-    aggregate = {"total_correct": 0, "total_wrong": 0, "mss_changed": 0, "crs_fixed": 0}
+    aggregate = {
+        "total_correct": prev_total_correct,
+        "total_wrong": prev_total_wrong,
+        "mss_changed": prev_mss_changed,
+        "crs_fixed": prev_crs_fixed,
+    }
     for _ in processes:
         stats = result_queue.get()
         for key in aggregate:
