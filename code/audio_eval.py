@@ -563,8 +563,10 @@ def run_inference_openai_api(
                     },
                     {"type": "text", "text": prompt_text},
                 ],
-        },
-    ]
+            },
+        ]
+        
+        logger.info("Starting API call for sample id=%s", sample_id)
 
         response_text = ""
         max_retries = 2
@@ -647,7 +649,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="Qwen/Qwen2-Audio-7B-Instruct",
-        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-audio-mini, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
+        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
     )
     parser.add_argument(
         "--num-gpus",

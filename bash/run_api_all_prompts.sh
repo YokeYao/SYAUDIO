@@ -12,12 +12,12 @@ MODEL="${1:-${DEFAULT_MODEL}}"  # optional positional arg overrides default mode
 LIMIT=9999
 WORKERS=4   # number of API workers (num-gpus flag is repurposed for API parallelism)
 
-DATASETS=(mmar mmau gsm8k mmlu)
+DATASETS=(gsm8k)
 # prompt entries: "<prompt_key> [variant]"
 PROMPTS=(
-  "bias_feedback strong"
-  "bias_feedback medium"
-  "bias_feedback low"
+  # "bias_feedback strong"
+  # "bias_feedback medium"
+  # "bias_feedback low"
   "are_you_sure"
   "answer_sycophancy"
   "mimicry_sycophancy"

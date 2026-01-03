@@ -14,7 +14,7 @@ Qwen2-Audio 在 MMAU / MMAR / GSM8K / MMLU 上的多轮 MCQ 评测脚本，包�
   ```
   申请时请确保节点数 ≤ 2、总 GPU 数 ≤ 4；可将 `--gres=gpu:2` 申请 2 卡，但时间仍需 ≤ 03:00:00。若需最长 24h，请改用 `sbatch` 批量提交：
   - GPU（开源模型）：`sbatch bash/run_gpu_all_prompts.sh`（脚本内已申请 1 节点、2 卡、24h，日志写入 `logs/`）；如需换模型，可在命令末尾追加模型名，例如 `sbatch bash/run_gpu_all_prompts.sh "Qwen/Qwen2-Audio-72B-Instruct"`。
-  - API（闭源模型，无需 GPU）：`sbatch bash/run_api_all_prompts.sh`；若需指定分区/时长，可在命令前补充 `-p/-q/-t`；如需换 API 模型，可在命令末尾追加模型名，例如 `sbatch bash/run_api_all_prompts.sh "gpt-audio-mini"`。
+  - API（闭源模型，无需 GPU）：`sbatch bash/run_api_all_prompts.sh`；若需指定分区/时长，可在命令前补充 `-p/-q/-t`；如需换 API 模型，可在命令末尾追加模型名，例如 `sbatch bash/run_api_all_prompts.sh "gpt-4o-mini-audio-preview"`。
   - `squeue --me` 可查看作业状态，示例：
     ```
     squeue --me
@@ -95,7 +95,7 @@ Before you run:
   ```
   Keep nodes ≤ 2 and total GPUs ≤ 4; you may switch to `--gres=gpu:2` for two GPUs but the wall time must stay ≤ 03:00:00. For up to 24h, submit with `sbatch`:
   - GPU (open-source models): `sbatch bash/run_gpu_all_prompts.sh` (requests 1 node, 2 GPUs, 24h; logs go to `logs/`); append a model name to override the default, e.g. `sbatch bash/run_gpu_all_prompts.sh "Qwen/Qwen2-Audio-72B-Instruct"`.
-  - API (closed-source, no GPU): `sbatch bash/run_api_all_prompts.sh`; add `-p/-q/-t` if you need to pin partition/qos/time; append a model name to override the default, e.g. `sbatch bash/run_api_all_prompts.sh "gpt-audio-mini"`.
+  - API (closed-source, no GPU): `sbatch bash/run_api_all_prompts.sh`; add `-p/-q/-t` if you need to pin partition/qos/time; append a model name to override the default, e.g. `sbatch bash/run_api_all_prompts.sh "gpt-4o-mini-audio-preview"`.
   - Check queue status with `squeue --me`, e.g.:
     ```
     squeue --me
