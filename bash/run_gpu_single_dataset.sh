@@ -27,15 +27,15 @@ DEFAULT_DATASET="mmlu"
 MODEL="${1:-${DEFAULT_MODEL}}"
 DATASET="${2:-${DATASET:-${DEFAULT_DATASET}}}"
 LIMIT=9999
-NUM_GPUS=2
+NUM_GPUS=4
 
 PROMPTS=(
   "bias_feedback strong"
-  "bias_feedback medium"
-  "bias_feedback low"
-  "are_you_sure"
-  "answer_sycophancy"
-  "mimicry_sycophancy"
+  # "bias_feedback medium"
+  # "bias_feedback low"
+  # "are_you_sure"
+  # "answer_sycophancy"
+  # "mimicry_sycophancy"
 )
 
 echo "[$(date)] Starting runs with model=${MODEL}, dataset=${DATASET}, limit=${LIMIT}, GPUs=${NUM_GPUS}"

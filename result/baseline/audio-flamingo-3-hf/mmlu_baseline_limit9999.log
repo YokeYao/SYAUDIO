@@ -1002,3 +1002,11 @@ cc=0.00% | raw=B
 2025-12-26 12:59:41 | INFO | Q499 id=mmlu_00997 | pred=B | gold=C | correct=False | running_acc=26.25% | raw=B
 2025-12-26 12:59:49 | INFO | Q500 id=mmlu_00999 | pred=B | gold=A | correct=False | running_acc=26.20% | raw=B
 2025-12-26 12:59:49 | INFO | Finished 500 questions | accuracy=26.20% (131/500)
+2025-12-28 08:39:16 | INFO | Launched 2 GPU workers on devices [0]; per-GPU logs at /home/junchi.yao/ICML2026-ALM/result/baseline/audio-flamingo-3-hf/mmlu_baseline_limit9999.log.gpu<id>.log
+2025-12-28 08:39:16 | INFO | Resuming: skipped 999 samples already logged (seen=999, prior_total=999, prior_correct=294)
+2025-12-28 08:40:08 | INFO | Launched 2 GPU workers on devices [0]; per-GPU logs at /home/junchi.yao/ICML2026-ALM/result/baseline/audio-flamingo-3-hf/mmlu_baseline_limit9999.log.gpu<id>.log
+2025-12-28 08:40:08 | INFO | Resuming: skipped 999 samples already logged (seen=999, prior_total=999, prior_correct=294)
+2025-12-28 08:40:33 | INFO | Resuming: found 0 completed samples (correct=0) in /home/junchi.yao/ICML2026-ALM/result/baseline/audio-flamingo-3-hf/mmlu_baseline_limit9999.gpu0.log
+2025-12-28 08:40:42 | INFO | Q01 id=mmlu_00000 | pred=B | gold=C | correct=False | running_acc=0.00% | raw=B
+2025-12-28 08:40:42 | INFO | Finished 1 questions | accuracy=0.00% (0/1)
+2025-12-28 08:40:43 | INFO | Aggregate finished 1000 questions | accuracy=29.40% (294/1000)

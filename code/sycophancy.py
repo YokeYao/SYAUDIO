@@ -1024,7 +1024,7 @@ def main() -> None:
             for shard_log in shard_logs:
                 if not shard_log.exists():
                     continue
-                content = shard_log.read_text(encoding="utf-8")
+                content = shard_log.read_text(encoding="utf-8", errors="replace")
                 if content:
                     if not content.endswith("\n"):
                         content += "\n"

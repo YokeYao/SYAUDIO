@@ -1,18 +1,31 @@
 #!/bin/bash
 # Run baseline + sycophancy prompts on all datasets via API model (no GPU required).
 
+#SBATCH -J api-all-prompts
+#SBATCH -p cscc-gpu-p
+#SBATCH -q cscc-gpu-qos
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:2
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
+#SBATCH -t 24:00:00
+#SBATCH -o logs/gpt_audio_mini_%A_%a.out
+#SBATCH -e logs/gpt_audio_mini_%A_%a.err
+#SBATCH --array=0-1
+
 set -euo pipefail
 
 source ~/.bashrc
 conda activate alm
 cd /home/junchi.yao/ICML2026-ALM
 
-DEFAULT_MODEL="vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking"
+DEFAULT_MODEL="gpt-audio-mini"
 MODEL="${1:-${DEFAULT_MODEL}}"  # optional positional arg overrides default model
 LIMIT=9999
 WORKERS=4   # number of API workers (num-gpus flag is repurposed for API parallelism)
 
-DATASETS=(gsm8k)
+DATASETS=(mmar gsm8k mmlu)
 # prompt entries: "<prompt_key> [variant]"
 PROMPTS=(
   # "bias_feedback strong"

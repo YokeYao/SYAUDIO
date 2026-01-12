@@ -22,7 +22,7 @@ cd /home/junchi.yao/ICML2026-ALM
 
 mkdir -p logs
 
-DEFAULT_MODEL="Qwen/Qwen2-Audio-7B-Instruct"
+DEFAULT_MODEL="nvidia/audio-flamingo-3-hf"
 MODEL="${1:-${DEFAULT_MODEL}}"  # optional positional arg overrides default model
 LIMIT=9999
 NUM_GPUS=2

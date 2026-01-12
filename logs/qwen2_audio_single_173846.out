@@ -2,3 +2,6 @@
 [Wed Dec 24 07:43:38 PM +04 2025] Dataset=mmlu | baseline
 No usable samples left after skipping seen ids (1000); assuming baseline already complete.
 [Wed Dec 24 07:43:46 PM +04 2025] Dataset=mmlu | prompt=bias_feedback | variant=strong
+[Wed Dec 24 07:56:34 PM +04 2025] Dataset=mmlu | prompt=bias_feedback | variant=medium
+[Wed Dec 24 08:22:09 PM +04 2025] Dataset=mmlu | prompt=bias_feedback | variant=low
+[Wed Dec 24 08:48:06 PM +04 2025] Dataset=mmlu | prompt=are_you_sure | variant=auto
