@@ -15,6 +15,8 @@ from typing import Dict, List
 
 from openai import OpenAI
 import librosa
+import soundfile as sf
+from kimia_infer.api.kimia import KimiAudio
 from transformers import (
     AutoProcessor,
     AudioFlamingo3ForConditionalGeneration,
@@ -270,6 +272,10 @@ def is_flamingo_model(model_id: str) -> bool:
     return "audio-flamingo-3" in model_id.lower()
 
 
+def is_kimi_model(model_id: str) -> bool:
+    return "kimi" in model_id.lower()
+
+
 def load_previous_results(log_path: Path) -> tuple[set[str], int, int]:
     """Parse an existing log to recover processed ids and counters."""
     if not log_path.exists():
@@ -306,6 +312,14 @@ def load_model_and_processor(model_id: str):
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
             model_id, device_map="auto", torch_dtype="auto", trust_remote_code=True
+        )
+    elif is_kimi_model(model_id):
+        try:
+            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        except ValueError:
+            processor = None
+        model = KimiAudio(
+            model_path=model_id, load_detokenizer=True
         )
     else:
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
@@ -369,44 +383,48 @@ def run_inference(
         if audio_field not in sample:
             raise KeyError(f"Sample missing '{audio_field}' for dataset {dataset.name}")
         audio_path = (audio_root / sample[audio_field]).resolve()
-        audio_waveform = load_audio(
-            audio_path, sampling_rate=processor.feature_extractor.sampling_rate
-        )
 
-        conversation = build_conversation(audio_path, prompt_text)
-        text = processor.apply_chat_template(
-            conversation, add_generation_prompt=True, tokenize=False
-        )
-        # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
-        # so force max-length padding for that family; other models can keep dynamic padding.
-        processor_kwargs = {
-            "text": text,
-            "audio": [audio_waveform],
-            "sampling_rate": processor.feature_extractor.sampling_rate,
-            "return_tensors": "pt",
-        }
-        if is_flamingo_model(model_id):
-            processor_kwargs.update({"padding": "max_length", "truncation": True})
+        if processor is None:
+            _, response = model.generate(audio_path, prompt_text)
         else:
-            processor_kwargs.update({"padding": True})
+            audio_waveform = load_audio(
+                audio_path, sampling_rate=processor.feature_extractor.sampling_rate
+            )
 
-        inputs = processor(**processor_kwargs).to(model.device)
+            conversation = build_conversation(audio_path, prompt_text)
+            text = processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=False
+            )
+            # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
+            # so force max-length padding for that family; other models can keep dynamic padding.
+            processor_kwargs = {
+                "text": text,
+                "audio": [audio_waveform],
+                "sampling_rate": processor.feature_extractor.sampling_rate,
+                "return_tensors": "pt",
+            }
+            if is_flamingo_model(model_id):
+                processor_kwargs.update({"padding": "max_length", "truncation": True})
+            else:
+                processor_kwargs.update({"padding": True})
 
-        # Use max_new_tokens to avoid HF warning when generation_config sets max_length.
-        generated = model.generate(**inputs, max_new_tokens=max_gen_len)
+            inputs = processor(**processor_kwargs).to(model.device)
 
-        # Omni models may return (sequences, audio_outputs). Standard models return a tensor or ModelOutput.
-        if hasattr(generated, "sequences"):
-            sequences = generated.sequences
-        elif isinstance(generated, tuple):
-            sequences = generated[0]
-        else:
-            sequences = generated
+            # Use max_new_tokens to avoid HF warning when generation_config sets max_length.
+            generated = model.generate(**inputs, max_new_tokens=max_gen_len)
 
-        sequences = sequences[:, inputs.input_ids.size(1) :]
-        response = processor.batch_decode(
-            sequences, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
+            # Omni models may return (sequences, audio_outputs). Standard models return a tensor or ModelOutput.
+            if hasattr(generated, "sequences"):
+                sequences = generated.sequences
+            elif isinstance(generated, tuple):
+                sequences = generated[0]
+            else:
+                sequences = generated
+
+            sequences = sequences[:, inputs.input_ids.size(1) :]
+            response = processor.batch_decode(
+                sequences, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0]
 
         boxed_content = extract_boxed_content(response)
         predicted_letter = normalize_prediction(response)
@@ -600,8 +618,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen2.5-Omni-7B",
-        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-audio-mini, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
+        default="Qwen/Qwen2-Audio-7B-Instruct",
+        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, moonshotai/Kimi-Audio-7B-Instruct, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
     )
     parser.add_argument(
         "--resume",
