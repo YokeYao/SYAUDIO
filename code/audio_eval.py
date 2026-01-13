@@ -9,6 +9,7 @@ import logging
 import re
 import time
 import torch
+import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
@@ -277,41 +278,59 @@ def is_kimi_model(model_id: str) -> bool:
 
 
 def load_previous_results(log_path: Path) -> tuple[set[str], int, int]:
-    """Parse an existing log to recover processed ids and counters."""
-    if not log_path.exists():
-        return set(), 0, 0
-
+    """Parse existing log(s) to recover processed ids and counters (base + per-GPU)."""
     pattern = re.compile(r"id=([^|]+).*?correct=(True|False)", re.IGNORECASE)
     seen_ids: set[str] = set()
     total = 0
     correct = 0
 
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        match = pattern.search(line)
-        if not match:
-            continue
-        sample_id, correct_flag = match.groups()
-        sample_id = sample_id.strip()
-        seen_ids.add(sample_id)
-        total += 1
-        correct += 1 if correct_flag.lower() == "true" else 0
+    def _accumulate(path: Path) -> None:
+        nonlocal total, correct
+        if not path.exists():
+            return
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = pattern.search(line)
+            if not match:
+                continue
+            sample_id, correct_flag = match.groups()
+            sample_id = sample_id.strip()
+            seen_ids.add(sample_id)
+            total += 1
+            correct += 1 if correct_flag.lower() == "true" else 0
 
+    _accumulate(log_path)
+    gpu_logs = log_path.parent.glob(f"{log_path.stem}.gpu*.log")
+    for gpu_log in gpu_logs:
+        _accumulate(gpu_log)
     return seen_ids, total, correct
 
 
-def load_model_and_processor(model_id: str):
+def _log_path_for_device(base_log: Path, device_id: int) -> Path:
+    return base_log.with_name(f"{base_log.stem}.gpu{device_id}{base_log.suffix}")
+
+
+def load_model_and_processor(model_id: str, device_id: int | None = None):
     """Select correct processor/model pair for the given model id."""
+    device_map = f"cuda:{device_id}" if device_id is not None else "auto"
     if is_omni_model(model_id):
         processor = Qwen2_5OmniProcessor.from_pretrained(
             model_id, trust_remote_code=True
         )
         model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-            model_id, device_map="auto", torch_dtype="auto", trust_remote_code=True
+            model_id, device_map=device_map, torch_dtype="auto", trust_remote_code=True
         )
     elif is_flamingo_model(model_id):
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-            model_id, device_map="auto", torch_dtype="auto", trust_remote_code=True
+            model_id, device_map=device_map, torch_dtype="auto", trust_remote_code=True
+        )
+    elif is_kimi_model(model_id):
+        try:
+            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        except ValueError:
+            processor = None
+        model = KimiAudio(
+            model_path=model_id, load_detokenizer=True
         )
     elif is_kimi_model(model_id):
         try:
@@ -324,7 +343,7 @@ def load_model_and_processor(model_id: str):
     else:
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         model = Qwen2AudioForConditionalGeneration.from_pretrained(
-            model_id, device_map="auto", trust_remote_code=True
+            model_id, device_map=device_map, trust_remote_code=True
         )
     return processor, model
 
@@ -340,9 +359,10 @@ def run_inference(
     initial_total: int = 0,
     initial_correct: int = 0,
     resume: bool = False,
-) -> None:
+    device_id: int | None = None,
+) -> Dict[str, int]:
     if is_openai_api_model(model_id):
-        run_inference_openai_api(
+        return run_inference_openai_api(
             samples=samples,
             audio_root=audio_root,
             dataset=dataset,
@@ -354,9 +374,8 @@ def run_inference(
             initial_correct=initial_correct,
             resume=resume,
         )
-        return
 
-    processor, model = load_model_and_processor(model_id)
+    processor, model = load_model_and_processor(model_id, device_id=device_id)
 
     processed_ids = set(processed_ids or ())
     total = initial_total
@@ -391,22 +410,22 @@ def run_inference(
                 audio_path, sampling_rate=processor.feature_extractor.sampling_rate
             )
 
-            conversation = build_conversation(audio_path, prompt_text)
-            text = processor.apply_chat_template(
-                conversation, add_generation_prompt=True, tokenize=False
-            )
-            # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
-            # so force max-length padding for that family; other models can keep dynamic padding.
-            processor_kwargs = {
-                "text": text,
-                "audio": [audio_waveform],
-                "sampling_rate": processor.feature_extractor.sampling_rate,
-                "return_tensors": "pt",
-            }
-            if is_flamingo_model(model_id):
-                processor_kwargs.update({"padding": "max_length", "truncation": True})
-            else:
-                processor_kwargs.update({"padding": True})
+        conversation = build_conversation(audio_path, prompt_text)
+        text = processor.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=False
+        )
+        # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
+        # so force max-length padding for that family; other models can keep dynamic padding.
+        processor_kwargs = {
+            "text": text,
+            "audio": [audio_waveform],
+            "sampling_rate": processor.feature_extractor.sampling_rate,
+            "return_tensors": "pt",
+        }
+        if is_flamingo_model(model_id):
+            processor_kwargs.update({"padding": "max_length", "truncation": True})
+        else:
+            processor_kwargs.update({"padding": "longest"})
 
             inputs = processor(**processor_kwargs).to(model.device)
 
@@ -455,6 +474,40 @@ def run_inference(
         correct,
         total,
     )
+    return {"total": total, "correct": correct}
+
+
+def _run_worker(
+    device_id: int,
+    samples: List[Dict],
+    audio_root: Path,
+    dataset: DatasetConfig,
+    model_id: str,
+    max_gen_len: int,
+    log_path: Path,
+    resume: bool,
+    processed_ids: set[str],
+    initial_total: int,
+    initial_correct: int,
+    result_queue: mp.Queue,
+) -> None:
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device_id)
+    logger = setup_logger(log_path, resume=resume)
+    stats = run_inference(
+        samples,
+        audio_root=audio_root,
+        dataset=dataset,
+        logger=logger,
+        model_id=model_id,
+        max_gen_len=max_gen_len,
+        processed_ids=processed_ids,
+        initial_total=initial_total,
+        initial_correct=initial_correct,
+        resume=resume,
+        device_id=device_id,
+    )
+    result_queue.put(stats)
 
 
 def encode_audio_for_openai(audio_path: Path) -> tuple[str, str]:
@@ -536,8 +589,10 @@ def run_inference_openai_api(
                     },
                     {"type": "text", "text": prompt_text},
                 ],
-        },
-    ]
+            },
+        ]
+        
+        logger.info("Starting API call for sample id=%s", sample_id)
 
         response_text = ""
         max_retries = 2
@@ -590,6 +645,7 @@ def run_inference_openai_api(
         correct,
         total,
     )
+    return {"total": total, "correct": correct}
 
 
 def parse_args() -> argparse.Namespace:
@@ -622,9 +678,10 @@ def parse_args() -> argparse.Namespace:
         help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, moonshotai/Kimi-Audio-7B-Instruct, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
     )
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from existing log: skip processed ids and keep counts.",
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use for local models (1, 2, or 4). Ignored for API models.",
     )
     return parser.parse_args()
 
@@ -640,35 +697,145 @@ def main() -> None:
         model_id=args.model,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    processed_ids: set[str] = set()
-    initial_total = 0
-    initial_correct = 0
-    if args.resume:
-        processed_ids, initial_total, initial_correct = load_previous_results(log_path)
-
-    logger = setup_logger(log_path, resume=args.resume)
+    processed_ids, initial_total, initial_correct = load_previous_results(log_path)
+    existing_logs = [log_path] + list(log_path.parent.glob(f"{log_path.stem}.gpu*.log"))
+    resume_logging = any(p.exists() for p in existing_logs)
+    resume_flag = bool(processed_ids)
 
     samples = load_dataset(data_path, limit=args.limit)
+
+    skipped = 0
+    if processed_ids:
+        before = len(samples)
+        samples = [s for s in samples if (s.get("id") or s.get("question_id")) not in processed_ids]
+        skipped = before - len(samples)
+
+    if not samples:
+        print(
+            f"No usable samples left after skipping seen ids ({len(processed_ids)});"
+            " assuming baseline already complete."
+        )
+        return
+
+    if is_openai_api_model(args.model) or args.num_gpus == 1:
+        logger = setup_logger(log_path, resume=resume_logging)
+        logger.info(
+            "Starting inference: dataset=%s | %d samples | prompt=baseline | limit=%d | model=%s | log=%s | gpus=%s",
+            dataset_cfg.name,
+            len(samples),
+            args.limit,
+            args.model,
+            log_path,
+            "API" if is_openai_api_model(args.model) else [0],
+        )
+        if skipped:
+            logger.info(
+                "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+                skipped,
+                len(processed_ids),
+                initial_total,
+                initial_correct,
+            )
+        run_inference(
+            samples,
+            audio_root=audio_root,
+            dataset=dataset_cfg,
+            logger=logger,
+            model_id=args.model,
+            max_gen_len=args.max_gen_len,
+            processed_ids=processed_ids,
+            initial_total=initial_total,
+            initial_correct=initial_correct,
+            resume=resume_flag,
+        )
+        return
+
+    available_gpus = torch.cuda.device_count()
+    device_ids = list(range(min(max(1, args.num_gpus), available_gpus)))
+    if not device_ids:
+        raise RuntimeError("No CUDA devices available for local models.")
+
+    shards: List[List[Dict]] = [samples[i:: len(device_ids)] for i in range(len(device_ids))]
+    shards = [s for s in shards if s]
+    mp.set_start_method("spawn", force=True)
+    result_queue: mp.Queue = mp.Queue()
+    processes: List[mp.Process] = []
+
+    def _log_path_for_device(base_log: Path, device_id: int) -> Path:
+        return base_log.with_name(f"{base_log.stem}.gpu{device_id}{base_log.suffix}")
+
+    logger = setup_logger(log_path, resume=resume_logging)
     logger.info(
-        "Starting inference: dataset=%s | %d samples | prompt=baseline | limit=%d | model=%s | log=%s",
-        dataset_cfg.name,
-        len(samples),
-        args.limit,
-        args.model,
+        "Launched %d GPU workers on devices %s; per-GPU logs at %s.gpu<id>.log",
+        len(device_ids),
+        device_ids[: len(shards)],
         log_path,
     )
+    if skipped:
+        logger.info(
+            "Resuming: skipped %d samples already logged (seen=%d, prior_total=%d, prior_correct=%d)",
+            skipped,
+            len(processed_ids),
+            initial_total,
+            initial_correct,
+        )
 
-    run_inference(
-        samples,
-        audio_root=audio_root,
-        dataset=dataset_cfg,
-        logger=logger,
-        model_id=args.model,
-        max_gen_len=args.max_gen_len,
-        processed_ids=processed_ids,
-        initial_total=initial_total,
-        initial_correct=initial_correct,
-        resume=args.resume,
+    for device_id, shard in zip(device_ids, shards):
+        worker_log = _log_path_for_device(log_path, device_id)
+        p = mp.Process(
+            target=_run_worker,
+            args=(
+                device_id,
+                shard,
+                audio_root,
+                dataset_cfg,
+                args.model,
+                args.max_gen_len,
+                worker_log,
+                resume_logging,
+                processed_ids,
+                0,
+                0,
+                result_queue,
+            ),
+            name=f"audio-eval-gpu{device_id}",
+        )
+        p.start()
+        processes.append(p)
+
+    aggregate = {"total": initial_total, "correct": initial_correct}
+    for _ in processes:
+        stats = result_queue.get()
+        for key in aggregate:
+            aggregate[key] += stats.get(key, 0)
+
+    for p in processes:
+        p.join()
+
+    gpu_logs = sorted(log_path.parent.glob(f"{log_path.stem}.gpu*.log"))
+    for handler in logger.handlers:
+        flush_fn = getattr(handler, "flush", None)
+        if flush_fn:
+            flush_fn()
+    if gpu_logs:
+        with log_path.open("a", encoding="utf-8") as main_log_file:
+            for gpu_log in gpu_logs:
+                if not gpu_log.exists():
+                    continue
+                content = gpu_log.read_text(encoding="utf-8")
+                if content:
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    main_log_file.write(content)
+                gpu_log.unlink(missing_ok=True)
+
+    acc = (aggregate["correct"] / aggregate["total"] * 100) if aggregate["total"] else 0.0
+    logger.info(
+        "Aggregate finished %d questions | accuracy=%.2f%% (%d/%d)",
+        aggregate["total"],
+        acc,
+        aggregate["correct"],
+        aggregate["total"],
     )
 
 

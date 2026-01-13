@@ -4,6 +4,7 @@ benchmark/GSM8K/audio/
 benchmark/MMLU/audio/
 benchmark/MMAR/audio/
 benchmark/MMAU/test-mini-audios/
+logs/
 
 # Python cache
 __pycache__/
