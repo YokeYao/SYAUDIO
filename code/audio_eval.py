@@ -6,6 +6,7 @@ import argparse
 import base64
 import json
 import logging
+import os
 import re
 import time
 import torch
@@ -13,6 +14,23 @@ import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
+# Due to the collapse of MBZUAI server's Lustre, I change the default model storage
+def _patch_hf_env():
+    home_cache = Path.home() / ".cache" / "huggingface"
+    env_paths = {
+        "HF_HOME": str(home_cache),
+        "HUGGINGFACE_HUB_CACHE": str(home_cache / "hub"),
+        "TRANSFORMERS_CACHE": str(home_cache / "transformers"),
+        "HF_TOKEN_PATH": str(home_cache / "token"),
+    }
+    for key, value in env_paths.items():
+        current = os.environ.get(key)
+        if current and current.startswith("/l/users/"):
+            os.environ[key] = value
+
+
+_patch_hf_env()
+MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
 
 from openai import OpenAI
 import librosa
@@ -23,6 +41,7 @@ from transformers import (
     Qwen2_5OmniForConditionalGeneration,
     Qwen2_5OmniProcessor,
 )
+from qwen_omni_utils import process_mm_info
 
 from prompt import PROMPTS
 
@@ -32,7 +51,6 @@ RESULT_DIR = REPO_ROOT / "result"
 BENCHMARK_DIR = REPO_ROOT / "benchmark"
 OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
 OPENAI_API_KEY = "sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc"
-
 
 def _patch_torch_autocast():
     # Some torch builds expose is_autocast_enabled() without a device_type arg; shim to ignore extras.
@@ -223,6 +241,27 @@ def build_conversation(audio_path: Path, prompt_text: str) -> list[dict]:
     ]
 
 
+def build_omni_conversation(audio_path: Path, prompt_text: str) -> list[dict]:
+    return [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "You are an audio question answering assistant.",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio": str(audio_path)},
+                {"type": "text", "text": prompt_text},
+            ],
+        },
+    ]
+
+
 def extract_boxed_content(prediction: str) -> str:
     """Return the last \\boxed{...} content if present."""
     matches = re.findall(r"\\boxed\{([^}]*)\}", prediction)
@@ -308,20 +347,35 @@ def load_model_and_processor(model_id: str, device_id: int | None = None):
     device_map = f"cuda:{device_id}" if device_id is not None else "auto"
     if is_omni_model(model_id):
         processor = Qwen2_5OmniProcessor.from_pretrained(
-            model_id, trust_remote_code=True
+            model_id, trust_remote_code=True, cache_dir=MODEL_CACHE_DIR
         )
         model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-            model_id, device_map=device_map, torch_dtype="auto", trust_remote_code=True
+            model_id,
+            device_map=device_map,
+            torch_dtype="auto",
+            trust_remote_code=True,
+            cache_dir=MODEL_CACHE_DIR,
         )
     elif is_flamingo_model(model_id):
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(
+            model_id, trust_remote_code=True, cache_dir=MODEL_CACHE_DIR
+        )
         model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-            model_id, device_map=device_map, torch_dtype="auto", trust_remote_code=True
+            model_id,
+            device_map=device_map,
+            torch_dtype="auto",
+            trust_remote_code=True,
+            cache_dir=MODEL_CACHE_DIR,
         )
     else:
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(
+            model_id, trust_remote_code=True, cache_dir=MODEL_CACHE_DIR
+        )
         model = Qwen2AudioForConditionalGeneration.from_pretrained(
-            model_id, device_map=device_map, trust_remote_code=True
+            model_id,
+            device_map=device_map,
+            trust_remote_code=True,
+            cache_dir=MODEL_CACHE_DIR,
         )
     return processor, model
 
@@ -380,31 +434,58 @@ def run_inference(
         if audio_field not in sample:
             raise KeyError(f"Sample missing '{audio_field}' for dataset {dataset.name}")
         audio_path = (audio_root / sample[audio_field]).resolve()
-        audio_waveform = load_audio(
-            audio_path, sampling_rate=processor.feature_extractor.sampling_rate
-        )
-
-        conversation = build_conversation(audio_path, prompt_text)
-        text = processor.apply_chat_template(
-            conversation, add_generation_prompt=True, tokenize=False
-        )
-        # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
-        # so force max-length padding for that family; other models can keep dynamic padding.
-        processor_kwargs = {
-            "text": text,
-            "audio": [audio_waveform],
-            "sampling_rate": processor.feature_extractor.sampling_rate,
-            "return_tensors": "pt",
-        }
-        if is_flamingo_model(model_id):
-            processor_kwargs.update({"padding": "max_length", "truncation": True})
+        if is_omni_model(model_id):
+            if process_mm_info is None:
+                raise RuntimeError(
+                    "qwen_omni_utils is not available; cannot run omni models."
+                )
+            conversation = build_omni_conversation(audio_path, prompt_text)
+            text = processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=False
+            )
+            audios, images, videos = process_mm_info(
+                conversation, use_audio_in_video=False
+            )
+            inputs = processor(
+                text=text,
+                audio=audios,
+                images=images,
+                videos=videos,
+                return_tensors="pt",
+                padding=True,
+                use_audio_in_video=False,
+            ).to(model.device)
+            generated = model.generate(
+                **inputs,
+                max_new_tokens=max_gen_len,
+                return_audio=False,
+            )
         else:
-            processor_kwargs.update({"padding": "longest"})
+            audio_waveform = load_audio(
+                audio_path, sampling_rate=processor.feature_extractor.sampling_rate
+            )
 
-        inputs = processor(**processor_kwargs).to(model.device)
+            conversation = build_conversation(audio_path, prompt_text)
+            text = processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=False
+            )
+            # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
+            # so force max-length padding for that family; other models can keep dynamic padding.
+            processor_kwargs = {
+                "text": text,
+                "audio": [audio_waveform],
+                "sampling_rate": processor.feature_extractor.sampling_rate,
+                "return_tensors": "pt",
+            }
+            if is_flamingo_model(model_id):
+                processor_kwargs.update({"padding": "max_length", "truncation": True})
+            else:
+                processor_kwargs.update({"padding": "longest"})
 
-        # Use max_new_tokens to avoid HF warning when generation_config sets max_length.
-        generated = model.generate(**inputs, max_new_tokens=max_gen_len)
+            inputs = processor(**processor_kwargs).to(model.device)
+
+            # Use max_new_tokens to avoid HF warning when generation_config sets max_length.
+            generated = model.generate(**inputs, max_new_tokens=max_gen_len)
 
         # Omni models may return (sequences, audio_outputs). Standard models return a tensor or ModelOutput.
         if hasattr(generated, "sequences"):
@@ -649,7 +730,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="Qwen/Qwen2-Audio-7B-Instruct",
-        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
+        help="Qwen/Qwen2-Audio-7B-Instruct, Qwen/Qwen2.5-Omni-7B, nvidia/audio-flamingo-3-hf, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
     )
     parser.add_argument(
         "--num-gpus",
