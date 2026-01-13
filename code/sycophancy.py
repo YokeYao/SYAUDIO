@@ -27,12 +27,14 @@ from audio_eval import (
     RESULT_DIR,
     DatasetConfig,
     build_conversation,
+    build_omni_conversation,
     build_log_path,
     build_prompt,
     encode_audio_for_openai,
     extract_boxed_content,
     extract_text_from_message_content,
     get_answer_letter,
+    is_omni_model,
     is_flamingo_model,
     load_audio,
     load_dataset,
@@ -43,6 +45,7 @@ from audio_eval import (
     load_model_and_processor
 )
 from prompt import PROMPTS
+from qwen_omni_utils import process_mm_info
 
 SYCOPHANCY_DIR = RESULT_DIR / "sycophancy"
 OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
@@ -298,31 +301,56 @@ def run_followup(
             )
             continue
         audio_path = (audio_root / sample[dataset_audio_field]).resolve()
-        audio_waveform = load_audio(
-            audio_path, sampling_rate=processor.feature_extractor.sampling_rate
-        )
-
-        conversation = build_conversation(audio_path, prompt_text)
-        text = processor.apply_chat_template(
-            conversation, add_generation_prompt=True, tokenize=False
-        )
-        # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
-        # so force max-length padding for that family; other models can keep dynamic padding.
-        processor_kwargs = {
-            "text": text,
-            "audio": [audio_waveform],
-            "sampling_rate": processor.feature_extractor.sampling_rate,
-            "return_tensors": "pt",
-        }
-        if is_flamingo_model(model_id):
-            processor_kwargs.update({"padding": "max_length", "truncation": True})
+        if is_omni_model(model_id):
+            if process_mm_info is None:
+                raise RuntimeError("qwen_omni_utils is not available; cannot run omni models.")
+            conversation = build_omni_conversation(audio_path, prompt_text)
+            text = processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=False
+            )
+            audios, images, videos = process_mm_info(
+                conversation, use_audio_in_video=False
+            )
+            inputs = processor(
+                text=text,
+                audio=audios,
+                images=images,
+                videos=videos,
+                return_tensors="pt",
+                padding=True,
+                use_audio_in_video=False,
+            ).to(model.device)
+            generated = model.generate(
+                **inputs,
+                max_new_tokens=max_gen_len,
+                return_audio=False,
+            )
         else:
-            processor_kwargs.update({"padding": True})
+            audio_waveform = load_audio(
+                audio_path, sampling_rate=processor.feature_extractor.sampling_rate
+            )
 
-        inputs = processor(**processor_kwargs).to(model.device)
+            conversation = build_conversation(audio_path, prompt_text)
+            text = processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=False
+            )
+            # AudioFlamingo3 expects audio features padded to its max length (1500 tokens post-conv),
+            # so force max-length padding for that family; other models can keep dynamic padding.
+            processor_kwargs = {
+                "text": text,
+                "audio": [audio_waveform],
+                "sampling_rate": processor.feature_extractor.sampling_rate,
+                "return_tensors": "pt",
+            }
+            if is_flamingo_model(model_id):
+                processor_kwargs.update({"padding": "max_length", "truncation": True})
+            else:
+                processor_kwargs.update({"padding": True})
 
-        # Use max_new_tokens to avoid HF warning when generation_config sets max_length.
-        generated = model.generate(**inputs, max_new_tokens=max_gen_len)
+            inputs = processor(**processor_kwargs).to(model.device)
+
+            # Use max_new_tokens to avoid HF warning when generation_config sets max_length.
+            generated = model.generate(**inputs, max_new_tokens=max_gen_len)
 
         # Omni models may return (sequences, audio_outputs). Standard models return a tensor or ModelOutput.
         if hasattr(generated, "sequences"):
