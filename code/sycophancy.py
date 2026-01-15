@@ -8,9 +8,28 @@ import re
 import time
 import torch
 import multiprocessing as mp
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Due to the collapse of MBZUAI server's Lustre, align HF cache to local home cache.
+def _patch_hf_env():
+    home_cache = Path.home() / ".cache" / "huggingface"
+    env_paths = {
+        "HF_HOME": str(home_cache),
+        "HUGGINGFACE_HUB_CACHE": str(home_cache / "hub"),
+        "TRANSFORMERS_CACHE": str(home_cache / "transformers"),
+        "HF_TOKEN_PATH": str(home_cache / "token"),
+    }
+    for key, value in env_paths.items():
+        current = os.environ.get(key)
+        if current and current.startswith("/l/users/"):
+            os.environ[key] = value
+
+
+_patch_hf_env()
+MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
 
 from openai import OpenAI
 from transformers import (
@@ -227,6 +246,7 @@ def run_followup(
     base_variant: str | None,
     logger: logging.Logger,
     model_id: str,
+    peft_path: Path | None,
     max_gen_len: int,
     processed_ids: set[str] | None = None,
     initial_total_correct: int = 0,
@@ -256,6 +276,12 @@ def run_followup(
         )
 
     processor, model = load_model_and_processor(model_id, device_id=device_id)
+    if peft_path:
+        if is_omni_model(model_id) or is_flamingo_model(model_id):
+            raise ValueError("PEFT adapters are only supported for Qwen2-Audio models.")
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, peft_path.as_posix())
+        model.eval()
 
     processed_ids = set(processed_ids or ())
     total_correct = initial_total_correct
@@ -631,6 +657,7 @@ def _run_worker(
     prompt_key: str,
     base_variant: str | None,
     model_id: str,
+    peft_path: Path | None,
     max_gen_len: int,
     log_path: Path,
     resume_log: bool,
@@ -653,6 +680,7 @@ def _run_worker(
         base_variant=base_variant,
         logger=logger,
         model_id=model_id,
+        peft_path=peft_path,
         max_gen_len=max_gen_len,
         processed_ids=processed_ids,
         initial_total_correct=initial_total_correct,
@@ -704,6 +732,12 @@ def parse_args() -> argparse.Namespace:
         help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
     )
     parser.add_argument(
+        "--peft",
+        type=Path,
+        default=None,
+        help="Optional LoRA/PEFT adapter path to load on top of --model.",
+    )
+    parser.add_argument(
         "--num-gpus",
         type=int,
         default=1,
@@ -714,6 +748,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    if args.peft and args.baseline_log is None:
+        raise ValueError("PEFT adapter provided; please pass --baseline-log from base model baseline evaluation.")
 
     if args.baseline_log:
         baseline_log = args.baseline_log
@@ -734,6 +771,11 @@ def main() -> None:
     sample_by_id = {s["id"]: s for s in samples}
 
     records = parse_baseline_log(baseline_log)
+    if not records:
+        raise ValueError(
+            "No baseline records parsed. Ensure --baseline-log points to a baseline eval log "
+            "(audio_eval output), not a sycophancy log."
+        )
     if args.limit is not None:
         records = records[: args.limit]
 
@@ -820,6 +862,7 @@ def main() -> None:
                 base_variant=args.variant,
                 logger=logger,
                 model_id=args.model,
+                peft_path=args.peft,
                 max_gen_len=args.max_gen_len,
                 processed_ids=seen_ids,
                 initial_total_correct=prev_total_correct,
@@ -866,6 +909,7 @@ def main() -> None:
                     prompt_key,
                     args.variant,
                     args.model,
+                    args.peft,
                     args.max_gen_len,
                     worker_log,
                     resume_logging,
@@ -965,6 +1009,7 @@ def main() -> None:
             base_variant=args.variant,
             logger=logger,
             model_id=args.model,
+            peft_path=args.peft,
             max_gen_len=args.max_gen_len,
             processed_ids=seen_ids,
             initial_total_correct=prev_total_correct,
@@ -994,6 +1039,7 @@ def main() -> None:
                 prompt_key,
                 args.variant,
                 args.model,
+                args.peft,
                 args.max_gen_len,
                 worker_log,
                 resume_logging,
