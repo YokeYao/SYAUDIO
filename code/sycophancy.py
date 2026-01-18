@@ -570,8 +570,8 @@ def run_followup_openai_api(
                     },
                     {"type": "text", "text": prompt_text},
                 ],
-        },
-    ]
+            },
+        ]
 
         response_text = ""
         max_retries = 2
