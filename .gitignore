@@ -1,14 +1,11 @@
 # Large audio assets
-ablation_audios/
 audio_samples/
+bash/logs/
 benchmark/GSM8K/audio/
-benchmark/GSM8K/audio_forest/
-benchmark/GSM8K/audio_street/
 benchmark/MMLU/audio/
-benchmark/MMLU/audio_forest/
-benchmark/MMLU/audio_street/
 benchmark/MMAR/audio/
 benchmark/MMAU/test-mini-audios/
+benchmark/ablation_data
 logs/
 
 # Python cache
