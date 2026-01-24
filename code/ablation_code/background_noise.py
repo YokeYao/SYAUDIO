@@ -24,7 +24,7 @@ def add_background_noise(
     workers: int = 1,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    audio_files = sorted(list(input_dir.glob("*.mp3")))[:100]
+    audio_files = sorted(list(input_dir.glob("*.mp3")))[1000:1101]
 
     def process_one(path: Path) -> str:
         out_path = output_dir / path.name

@@ -35,11 +35,14 @@ MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
 from openai import OpenAI
 from transformers import (
     AutoProcessor,
-    AudioFlamingo3ForConditionalGeneration,
     Qwen2AudioForConditionalGeneration,
     Qwen2_5OmniForConditionalGeneration,
     Qwen2_5OmniProcessor,
 )
+try:
+    from transformers import AudioFlamingo3ForConditionalGeneration
+except ImportError:  # pragma: no cover - optional dependency
+    AudioFlamingo3ForConditionalGeneration = None
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CODE_DIR = REPO_ROOT / "code"
@@ -70,7 +73,10 @@ from audio_eval import (
     load_model_and_processor
 )
 from prompt import PROMPTS
-from qwen_omni_utils import process_mm_info
+try:
+    from qwen_omni_utils import process_mm_info
+except ImportError:  # pragma: no cover - optional dependency
+    process_mm_info = None
 
 SYCOPHANCY_ABLATION_DIR = RESULT_DIR / "sycophancyAblation" / "noise_sycophancy"
 OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
@@ -800,7 +806,10 @@ def main() -> None:
             "(audio_eval output), not a sycophancy log."
         )
     
-    records = records = [r for r in records if int(r.sample_id[-5:]) < 100]
+    if dataset_name == "gsm8k":
+        records = records = [r for r in records if (1000 < int(r.sample_id[-5:]) <= 1100)]
+    else:
+        records = records = [r for r in records if (int(r.sample_id[-5:]) < 100)]
 
     filtered: list[BaselineRecord] = []
     for rec in records:

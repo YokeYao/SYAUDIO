@@ -36,12 +36,18 @@ from openai import OpenAI
 import librosa
 from transformers import (
     AutoProcessor,
-    AudioFlamingo3ForConditionalGeneration,
     Qwen2AudioForConditionalGeneration,
     Qwen2_5OmniForConditionalGeneration,
     Qwen2_5OmniProcessor,
 )
-from qwen_omni_utils import process_mm_info
+try:
+    from transformers import AudioFlamingo3ForConditionalGeneration
+except ImportError:  # pragma: no cover - optional dependency
+    AudioFlamingo3ForConditionalGeneration = None
+try:
+    from qwen_omni_utils import process_mm_info
+except ImportError:  # pragma: no cover - optional dependency
+    process_mm_info = None
 
 from prompt import PROMPTS
 
@@ -74,6 +80,7 @@ class DatasetConfig:
     default_data: Path
     default_audio_root: Path
     audio_field: str
+    ablation_audio_root: Path = None
 
 
 DATASET_CONFIGS: dict[str, DatasetConfig] = {
@@ -93,12 +100,14 @@ DATASET_CONFIGS: dict[str, DatasetConfig] = {
         name="gsm8k",
         default_data=BENCHMARK_DIR / "GSM8K" / "test_mcq.jsonl",
         default_audio_root=BENCHMARK_DIR / "GSM8K",
+        ablation_audio_root=BENCHMARK_DIR / "ablation_data" / "background_noise" / "GSM8K",
         audio_field="audio_path",
     ),
     "mmlu": DatasetConfig(
         name="mmlu",
         default_data=BENCHMARK_DIR / "MMLU" / "mmlu_combined.jsonl",
         default_audio_root=BENCHMARK_DIR / "MMLU",
+        ablation_audio_root=BENCHMARK_DIR / "ablation_data" / "background_noise" / "MMLU",
         audio_field="audio_path",
     ),
 }
@@ -357,6 +366,10 @@ def load_model_and_processor(model_id: str, device_id: int | None = None):
             cache_dir=MODEL_CACHE_DIR,
         )
     elif is_flamingo_model(model_id):
+        if AudioFlamingo3ForConditionalGeneration is None:
+            raise ImportError(
+                "AudioFlamingo3ForConditionalGeneration is not available in this environment."
+            )
         processor = AutoProcessor.from_pretrained(
             model_id, trust_remote_code=True, cache_dir=MODEL_CACHE_DIR
         )

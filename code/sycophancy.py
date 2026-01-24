@@ -34,11 +34,14 @@ MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
 from openai import OpenAI
 from transformers import (
     AutoProcessor,
-    AudioFlamingo3ForConditionalGeneration,
     Qwen2AudioForConditionalGeneration,
     Qwen2_5OmniForConditionalGeneration,
     Qwen2_5OmniProcessor,
 )
+try:
+    from transformers import AudioFlamingo3ForConditionalGeneration
+except ImportError:  # pragma: no cover - optional dependency
+    AudioFlamingo3ForConditionalGeneration = None
 
 from audio_eval import (
     CHOICE_LETTERS,
@@ -64,7 +67,10 @@ from audio_eval import (
     load_model_and_processor
 )
 from prompt import PROMPTS
-from qwen_omni_utils import process_mm_info
+try:
+    from qwen_omni_utils import process_mm_info
+except ImportError:  # pragma: no cover - optional dependency
+    process_mm_info = None
 
 SYCOPHANCY_DIR = RESULT_DIR / "sycophancy"
 OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
