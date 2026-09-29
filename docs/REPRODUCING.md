@@ -47,7 +47,7 @@ The runners automatically resume existing logs. Use a fresh output root when cha
 
 ## Human versus synthetic speech
 
-Core data come from `YokyYao/ALM-Sycophancy` on Hugging Face. Human-validation audio and annotations currently come from the GitHub clone; they are not yet in that Hugging Face repository. `--groups all` verifies those existing local files and downloads the core data.
+Core data and human-validation audio and annotations are available from `YokyYao/ALM-Sycophancy` on Hugging Face. `--groups all` downloads and verifies both, including into a fresh destination; matching files already present in the GitHub clone are verified and reused.
 
 The three collaborator-uploaded directories `TTS-Annie`, `TTS-Danielle` and `TTS-Junchi` contain **human readings**, despite their historical directory names. They cover 100 aligned GSM8K MCQ questions (IDs 00000–00099), not a new split of 300 questions. Their corresponding `test_mcq_<speaker>_100.jsonl` files preserve question and choice order while changing the audio path.
 

@@ -103,11 +103,6 @@ def main() -> None:
         kwargs['cache_dir'] = str(args.cache_dir)
     groups = set([*CORE, *HUMAN] if 'all' in args.groups else args.groups)
     records = [x for x in index['files'] if x['group'] in groups]
-    # The human supplement is already tracked in GitHub, but not yet on HF.
-    for record in records:
-        if record['group'] in HUMAN and not (args.destination / record['path']).exists():
-            raise FileNotFoundError('Human validation files currently come with the GitHub clone. '
-                                    'Use that clone as --destination; HF supplemental upload is pending.')
     from concurrent.futures import ThreadPoolExecutor
     from functools import partial
     install = partial(install_direct_file, destination=args.destination, **kwargs)

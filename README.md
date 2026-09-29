@@ -22,7 +22,7 @@ Audio Language Models (ALMs) have recently shown strong capabilities in unified 
 
 ## Dataset
 
-**Availability:** all 4,319 core audio files and four annotation files already exist at the linked Hugging Face repository and match this release byte-for-byte. The 300 human-validation recordings remain available in this GitHub repository; their supplemental Hugging Face upload is pending write access.
+**Availability:** all 4,319 core audio files, 300 human-validation recordings, and seven annotation files are available at the linked Hugging Face repository and match this release byte-for-byte. The human-validation recordings are also retained in this GitHub repository.
 
 | Domain | Source | Core questions |
 |---|---|---:|
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 ```bash
 pip install huggingface_hub
 python scripts/download_syaudio.py
-# Optional: also verify human validation recordings already present in this GitHub clone.
+# Optional: also download and verify the human-validation recordings.
 python scripts/download_syaudio.py --groups all
 ```
 
