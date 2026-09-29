@@ -14,23 +14,7 @@ import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
-# Due to the collapse of MBZUAI server's Lustre, I change the default model storage
-def _patch_hf_env():
-    home_cache = Path.home() / ".cache" / "huggingface"
-    env_paths = {
-        "HF_HOME": str(home_cache),
-        "HUGGINGFACE_HUB_CACHE": str(home_cache / "hub"),
-        "TRANSFORMERS_CACHE": str(home_cache / "transformers"),
-        "HF_TOKEN_PATH": str(home_cache / "token"),
-    }
-    for key, value in env_paths.items():
-        current = os.environ.get(key)
-        if current and current.startswith("/l/users/"):
-            os.environ[key] = value
-
-
-_patch_hf_env()
-MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
+MODEL_CACHE_DIR = os.environ.get("HF_HUB_CACHE")
 
 from openai import OpenAI
 import librosa
@@ -53,10 +37,10 @@ from prompt import PROMPTS
 
 CHOICE_LETTERS = "ABCD"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RESULT_DIR = REPO_ROOT / "result"
-BENCHMARK_DIR = REPO_ROOT / "benchmark"
-OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
-OPENAI_API_KEY = "sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc"
+RESULT_DIR = Path(os.environ.get("SYAUDIO_RESULT_ROOT", str(REPO_ROOT / "result")))
+BENCHMARK_DIR = Path(os.environ.get("SYAUDIO_DATA_ROOT", str(REPO_ROOT / "benchmark")))
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 def _patch_torch_autocast():
     # Some torch builds expose is_autocast_enabled() without a device_type arg; shim to ignore extras.
@@ -115,6 +99,10 @@ DATASET_CONFIGS: dict[str, DatasetConfig] = {
 
 def model_dir_name(model_id: str) -> str:
     """Return a filesystem-friendly folder name for a model id."""
+    # Local Hugging Face snapshot paths end in an opaque commit hash. Keep the
+    # human-readable model name stable across snapshots and evaluation modes.
+    if "Qwen2-Audio-7B-Instruct" in model_id:
+        return "Qwen2-Audio-7B-Instruct"
     return model_id.rstrip("/").split("/")[-1]
 
 
@@ -751,19 +739,24 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of GPUs to use for local models (1, 2, or 4). Ignored for API models.",
     )
+    parser.add_argument("--data", type=Path, default=None, help="Override the dataset annotation file.")
+    parser.add_argument("--audio-root", type=Path, default=None, help="Override the audio root directory.")
+    parser.add_argument("--log-path", type=Path, default=None, help="Override baseline log path; keep dataset prefix, e.g. gsm8k_human.log.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     dataset_cfg = DATASET_CONFIGS[args.dataset]
-    data_path = dataset_cfg.default_data
-    audio_root = dataset_cfg.default_audio_root
+    data_path = args.data or dataset_cfg.default_data
+    audio_root = args.audio_root or dataset_cfg.default_audio_root
     log_path = build_log_path(
         dataset=dataset_cfg.name,
         limit=args.limit,
         model_id=args.model,
     )
+    if args.log_path is not None:
+        log_path = args.log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
     processed_ids, initial_total, initial_correct = load_previous_results(log_path)
     existing_logs = [log_path] + list(log_path.parent.glob(f"{log_path.stem}.gpu*.log"))

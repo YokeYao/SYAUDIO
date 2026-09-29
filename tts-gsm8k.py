@@ -1,3 +1,4 @@
+import os
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -68,7 +69,7 @@ def synthesize_questions(
 def main() -> None:
     client = OpenAI(
         base_url="https://api.ohmygpt.com/v1",
-        api_key="sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc",
+        api_key=os.environ.get("OPENAI_API_KEY", ""),
     )
 
     base_path = Path(__file__).resolve().parent

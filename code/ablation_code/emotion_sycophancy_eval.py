@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import logging
@@ -41,10 +43,10 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     process_mm_info = None
 
-OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
-OPENAI_API_KEY = "sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc"
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 # OPENAI_BASE_URL = "https://api.openai.com/v1"
-# OPENAI_API_KEY = "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"
+
 
 EMOTION_RESULT_DIR = RESULT_DIR / "sycophancyAblation" / "emotionSycophancy"
 

@@ -1,3 +1,4 @@
+import os
 import argparse
 import json
 import random
@@ -16,7 +17,7 @@ except ImportError:
 # Target model config
 MODEL_CONFIG = {
     "model_id": "gemini-2.5-flash-thinking",
-    "api_key": "sk-P1rnCJIQT70T6CoVZqTMCl4fR8n4qd8PB2FKNAqvpgFT17bG",
+    "api_key": os.environ.get("OPENAI_API_KEY", ""),
     "base_url": "http://35.220.164.252:3888/v1/",
 }
 
