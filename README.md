@@ -4,7 +4,7 @@
 
 **Accepted at NeurIPS 2026 — Main Poster**
 
-[Paper](https://arxiv.org/abs/2601.23149) · [Dataset: SYAUDIO](https://huggingface.co/datasets/Ricardo-H/SYAUDIO) · [Data licenses](docs/DATA_LICENSES.md) · [Reproduction guide](docs/REPRODUCING.md)
+[Paper](https://arxiv.org/abs/2601.23149) · [Dataset: SYAUDIO](https://huggingface.co/datasets/YokyYao/ALM-Sycophancy) · [Data licenses](docs/DATA_LICENSES.md) · [Reproduction guide](docs/REPRODUCING.md)
 
 **Authors:** Junchi Yao, Lokranjan Lakshmikanthan, Annie Zhao, Danielle Zhao, Shu Yang, Zikang Ding, Di Wang, Lijie Hu
 
@@ -22,7 +22,7 @@ Audio Language Models (ALMs) have recently shown strong capabilities in unified 
 
 ## Dataset
 
-**Upload status:** the verified archives are prepared locally; publication to the linked Hugging Face destination is awaiting confirmation. The download command becomes usable after publication.
+**Availability:** all 4,319 core audio files and four annotation files already exist at the linked Hugging Face repository and match this release byte-for-byte. The 300 human-validation recordings remain available in this GitHub repository; their supplemental Hugging Face upload is pending write access.
 
 | Domain | Source | Core questions |
 |---|---|---:|
@@ -32,9 +32,9 @@ Audio Language Models (ALMs) have recently shown strong capabilities in unified 
 | Audio Ethics | MMLU (moral)-Audio | 1,000 |
 | **Total** | **SYAUDIO** | **4,319** |
 
-The core audio occupies **6.39 GB before archive compression**. Full audio and annotations are prepared for publication on [Hugging Face as `Ricardo-H/SYAUDIO`](https://huggingface.co/datasets/Ricardo-H/SYAUDIO); GitHub retains the lightweight annotations, evaluation code, and the collaborator-contributed human validation recordings already present in this repository. The dataset release also includes **300 human recordings** (100 aligned questions × three speakers), separate from the core benchmark.
+The core audio occupies **6.39 GB before archive compression**. Core audio and annotations are available on [Hugging Face as `YokyYao/ALM-Sycophancy`](https://huggingface.co/datasets/YokyYao/ALM-Sycophancy); GitHub retains the lightweight annotations, evaluation code, and the collaborator-contributed human validation recordings already present in this repository. This GitHub release also includes **300 human recordings** (100 aligned questions × three speakers), separate from the core benchmark.
 
-All core audio references and human-recording references were checked. The annotation audit found 14 unresolved answer labels, 2 numeric-index fallbacks and 29 rows with more than four options; original data are preserved and the details are documented in the [reproduction guide](docs/REPRODUCING.md#annotation-compatibility-findings). The release includes original paths, sample IDs, SHA-256 checksums, per-component provenance, and archives preserving the original audio bytes. Dataset licenses differ by component; see [DATA_LICENSES.md](docs/DATA_LICENSES.md).
+All core audio references and human-recording references were checked. The annotation audit found 14 unresolved answer labels, 2 numeric-index fallbacks and 29 rows with more than four options; original data are preserved and the details are documented in the [reproduction guide](docs/REPRODUCING.md#annotation-compatibility-findings). The release includes original paths, sample IDs, per-component provenance, and a [verified file index](scripts/syaudio-files.json) with SHA-256 checksums. The installer uses the existing Hugging Face folder layout without duplicating its audio into archives. Dataset licenses differ by component; see [DATA_LICENSES.md](docs/DATA_LICENSES.md).
 
 ## Installation
 
@@ -53,11 +53,11 @@ pip install -r requirements.txt
 ```bash
 pip install huggingface_hub
 python scripts/download_syaudio.py
-# Optional: include the human validation recordings as well.
+# Optional: also verify human validation recordings already present in this GitHub clone.
 python scripts/download_syaudio.py --groups all
 ```
 
-The installer verifies archive and file checksums and refuses to overwrite differing local files. Use `--destination /path/to/new-directory` for a separate installation and `--revision <commit-sha>` to pin a dataset revision. Data are installed under `<destination>/benchmark/`.
+The installer pins the verified Hugging Face commit and checks individual file hashes; it refuses to overwrite differing local files. Use `--destination /path/to/new-directory` for a separate installation and `--revision <commit-sha>` to pin a dataset revision. Data are installed under `<destination>/benchmark/`.
 
 ## Quick start
 
