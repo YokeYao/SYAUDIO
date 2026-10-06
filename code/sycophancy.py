@@ -13,31 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# Due to the collapse of MBZUAI server's Lustre, align HF cache to local home cache.
-def _patch_hf_env():
-    home_cache = Path.home() / ".cache" / "huggingface"
-    env_paths = {
-        "HF_HOME": str(home_cache),
-        "HUGGINGFACE_HUB_CACHE": str(home_cache / "hub"),
-        "TRANSFORMERS_CACHE": str(home_cache / "transformers"),
-        "HF_TOKEN_PATH": str(home_cache / "token"),
-    }
-    for key, value in env_paths.items():
-        current = os.environ.get(key)
-        if current and current.startswith("/l/users/"):
-            os.environ[key] = value
-
-
-_patch_hf_env()
-MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
+MODEL_CACHE_DIR = os.environ.get("HF_HUB_CACHE")
 
 from openai import OpenAI
-from transformers import (
-    AutoProcessor,
-    Qwen2AudioForConditionalGeneration,
-    Qwen2_5OmniForConditionalGeneration,
-    Qwen2_5OmniProcessor,
-)
+from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+try:
+    from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+except ImportError:  # pragma: no cover - optional dependency
+    Qwen2_5OmniForConditionalGeneration = None
+    Qwen2_5OmniProcessor = None
 try:
     from transformers import AudioFlamingo3ForConditionalGeneration
 except ImportError:  # pragma: no cover - optional dependency
@@ -66,15 +50,19 @@ from audio_eval import (
     is_openai_api_model,
     load_model_and_processor
 )
-from prompt import PROMPTS
+if os.environ.get("SYAUDIO_PROMPT_SET", "standard") == "anti":
+    from prompt_anti_sycophancy import PROMPTS
+else:
+    from prompt import PROMPTS
+
 try:
     from qwen_omni_utils import process_mm_info
 except ImportError:  # pragma: no cover - optional dependency
     process_mm_info = None
 
 SYCOPHANCY_DIR = RESULT_DIR / "sycophancy"
-OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
-OPENAI_API_KEY = "sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc"
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 
 def _patch_torch_autocast():
@@ -749,6 +737,14 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of GPUs to use (supports 1, 2, or 4). Ignored for API models. Uses device ids starting at 0.",
     )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=SYCOPHANCY_DIR,
+        help="Optional output directory for logs (default: result/sycophancy).",
+    )
+    parser.add_argument("--data", type=Path, default=None, help="Override the dataset annotation file.")
+    parser.add_argument("--audio-root", type=Path, default=None, help="Override the audio root directory.")
     return parser.parse_args()
 
 
@@ -770,8 +766,8 @@ def main() -> None:
         baseline_log = build_log_path(dataset_name, limit=9999)
 
     dataset_cfg = DATASET_CONFIGS[dataset_name]
-    data_path = dataset_cfg.default_data
-    audio_root = dataset_cfg.default_audio_root.resolve()
+    data_path = args.data or dataset_cfg.default_data
+    audio_root = args.audio_root or dataset_cfg.default_audio_root.resolve()
 
     samples = load_dataset(data_path)
     sample_by_id = {s["id"]: s for s in samples}
@@ -812,10 +808,11 @@ def main() -> None:
     elif prompt_key in {"answer_sycophancy", "mimicry_sycophancy"}:
         log_name_parts.append("auto")
     
+    out_dir = args.out_dir
     if args.model:
-        log_path = SYCOPHANCY_DIR / model_dir_name(args.model) / f"{'_'.join(log_name_parts)}.log"
-    else: 
-        log_path = SYCOPHANCY_DIR / f"{'_'.join(log_name_parts)}.log"
+        log_path = out_dir / model_dir_name(args.model) / f"{'_'.join(log_name_parts)}.log"
+    else:
+        log_path = out_dir / f"{'_'.join(log_name_parts)}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     seen_ids, prev_total_correct, prev_total_wrong, prev_mss_changed, prev_crs_fixed = load_previous_results(log_path)

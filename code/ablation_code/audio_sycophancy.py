@@ -6,39 +6,21 @@ import subprocess
 import argparse
 import logging
 import multiprocessing as mp
+import queue
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Dict, List
-# Due to the collapse of MBZUAI server's Lustre, I change the default model storage
-def _patch_hf_env():
-    home_cache = Path.home() / ".cache" / "huggingface"
-    env_paths = {
-        "HF_HOME": str(home_cache),
-        "HUGGINGFACE_HUB_CACHE": str(home_cache / "hub"),
-        "TRANSFORMERS_CACHE": str(home_cache / "transformers"),
-        "HF_TOKEN_PATH": str(home_cache / "token"),
-    }
-    for key, value in env_paths.items():
-        current = os.environ.get(key)
-        if not current or current.startswith("/l/users/"):
-            os.environ[key] = value
-
-
-_patch_hf_env()
 import librosa
 import numpy as np
 import soundfile as sf
 import torch
 from openai import OpenAI
-try:
-    from qwen_tts import Qwen3TTSModel
-except ImportError as exc:  # pragma: no cover - optional dependency
-    Qwen3TTSModel = None
-    _QWEN_TTS_IMPORT_ERROR = exc
-else:
-    _QWEN_TTS_IMPORT_ERROR = None
+
+Qwen3TTSModel = None
+_QWEN_TTS_IMPORT_ERROR: ImportError | None = None
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CODE_DIR = REPO_ROOT / "code"
@@ -48,6 +30,7 @@ if str(CODE_DIR) not in sys.path:
 from audio_eval import (
     DATASET_CONFIGS,
     RESULT_DIR,
+    build_conversation,
     build_log_path,
     encode_audio_for_openai,
     extract_boxed_content,
@@ -78,8 +61,8 @@ except ImportError:  # pragma: no cover - optional dependency
 
 AUDIO_SYCOPHANCY_DATA_DIR = REPO_ROOT / "benchmark" / "ablation_data" / "audioSycophancy"
 AUDIO_SYCOPHANCY_RESULT_DIR = RESULT_DIR / "sycophancyAblation" / "audioSycophancy"
-OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
-OPENAI_API_KEY = "sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc"
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 _QWEN_TTS_CACHE: dict[tuple[str, str], "Qwen3TTSModel"] = {}
 
@@ -206,6 +189,27 @@ def split_prompt_for_audio(prompt_text: str, prompt_key: str) -> tuple[str, str,
     return pre_text, post_text, post_static
 
 
+def split_prompt_for_text_question_audio_followup(
+    prompt_text: str, prompt_key: str
+) -> tuple[str, str]:
+    marker = "Second round QA starts here:"
+    if marker not in prompt_text:
+        if prompt_key == "mimicry_sycophancy":
+            cue_marker = "You have to choose a letter."
+            cue_text, question_text = prompt_text.split(cue_marker, 1)
+            return (
+                f"You have to choose a letter.{question_text}".strip(),
+                cue_text.strip(),
+            )
+        raise ValueError(
+            "text-question + audio-followup mode requires a prompt with "
+            "'Second round QA starts here:' so question/history and follow-up can be separated."
+        )
+
+    text_context, _, audio_followup = prompt_text.partition(marker)
+    return text_context.strip(), audio_followup.strip()
+
+
 def ensure_last_choice(prompt_text: str, last_choice: str) -> str:
     if not last_choice:
         last_choice = "A"
@@ -226,6 +230,15 @@ def _resolve_tts_device(device_id: int | None) -> str:
 
 
 def _load_qwen_tts_model(model_id: str, device_id: int | None) -> "Qwen3TTSModel":
+    global Qwen3TTSModel, _QWEN_TTS_IMPORT_ERROR
+    if Qwen3TTSModel is None and _QWEN_TTS_IMPORT_ERROR is None:
+        try:
+            from qwen_tts import Qwen3TTSModel as Qwen3TTSModelClass
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            _QWEN_TTS_IMPORT_ERROR = exc
+        else:
+            Qwen3TTSModel = Qwen3TTSModelClass
+
     if Qwen3TTSModel is None:
         raise RuntimeError(
             "qwen_tts is not installed. Please install it before running TTS."
@@ -270,18 +283,43 @@ def synthesize_prompt_audio_openai(
     voice: str,
     response_format: str,
     overwrite: bool,
+    max_retries: int = 5,
+    initial_retry_delay_sec: float = 2.0,
 ) -> str:
     if output_path.exists() and not overwrite:
         return "skipped"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with client.audio.speech.with_streaming_response.create(
-        model=model,
-        voice=voice,
-        input=prompt_text,
-        response_format=response_format,
-    ) as response:
-        response.stream_to_file(output_path)
+    last_error: Exception | None = None
+    tmp_output_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    for attempt in range(max_retries + 1):
+        try:
+            if tmp_output_path.exists():
+                tmp_output_path.unlink()
+            with client.audio.speech.with_streaming_response.create(
+                model=model,
+                voice=voice,
+                input=prompt_text,
+                response_format=response_format,
+            ) as response:
+                response.stream_to_file(tmp_output_path)
+            tmp_output_path.replace(output_path)
+            return "done"
+        except Exception as exc:
+            last_error = exc
+            if tmp_output_path.exists():
+                tmp_output_path.unlink()
+            if attempt >= max_retries:
+                raise
+            sleep_sec = initial_retry_delay_sec * (2 ** attempt)
+            print(
+                f"[tts retry] output={output_path.name} attempt={attempt + 1}/{max_retries + 1} "
+                f"failed with {type(exc).__name__}: {exc}; sleeping {sleep_sec:.1f}s",
+                flush=True,
+            )
+            time.sleep(sleep_sec)
+    if last_error is not None:
+        raise last_error
     return "done"
 
 
@@ -431,6 +469,7 @@ def run_followup_openai_api(
     dataset_name: str,
     audio_root: Path,
     dataset_audio_field: str,
+    question_format: str,
     prompt_key: str,
     base_variant: str | None,
     logger: logging.Logger,
@@ -496,11 +535,17 @@ def run_followup_openai_api(
             baseline_correct=rec.correct,
         )
         prompt_text = ensure_last_choice(prompt_text, rec.pred_letter)
-        pre_text, post_text, post_static_text = split_prompt_for_audio(
-            prompt_text, prompt_key
-        )
+        if question_format == "text":
+            pre_text, post_text = split_prompt_for_text_question_audio_followup(
+                prompt_text, prompt_key
+            )
+            post_static_text = ""
+        else:
+            pre_text, post_text, post_static_text = split_prompt_for_audio(
+                prompt_text, prompt_key
+            )
 
-        include_dataset_audio = dataset_name not in {"gsm8k", "mmlu"}
+        include_dataset_audio = question_format == "audio" and dataset_name not in {"gsm8k", "mmlu"}
         dataset_audio = None
         if include_dataset_audio:
             if dataset_audio_field not in sample:
@@ -539,15 +584,6 @@ def run_followup_openai_api(
         if tts_backend == "openai":
             synthesize_prompt_audio_openai(
                 client,
-                pre_text,
-                output_path=tts_pre_path,
-                model=tts_model,
-                voice=tts_voice,
-                response_format=tts_format,
-                overwrite=overwrite_audio,
-            )
-            synthesize_prompt_audio_openai(
-                client,
                 post_text,
                 output_path=tts_post_path,
                 model=tts_model,
@@ -566,16 +602,6 @@ def run_followup_openai_api(
                     overwrite=overwrite_audio,
                 )
         elif tts_backend == "qwen":
-            synthesize_prompt_audio_qwen(
-                tts_model_handle,
-                pre_text,
-                output_path=tts_pre_path,
-                language=tts_language,
-                speaker=tts_voice,
-                instruct=tts_instruct,
-                overwrite=overwrite_audio,
-                fallback_sample_rate=sample_rate,
-            )
             synthesize_prompt_audio_qwen(
                 tts_model_handle,
                 post_text,
@@ -599,18 +625,65 @@ def run_followup_openai_api(
                 )
         else:
             raise ValueError(f"Unknown TTS backend: {tts_backend}")
-        combine_audio_files(
-            tts_pre_path,
-            dataset_audio,
-            tts_post_path,
-            output_path=combined_path,
-            sample_rate=sample_rate,
-            silence_sec=silence_sec,
-            overwrite=overwrite_audio,
-            post_static_audio=tts_post_static_path if post_static_text else None,
-        )
+        if question_format == "audio":
+            synthesize_prompt_audio_openai(
+                client,
+                pre_text,
+                output_path=tts_pre_path,
+                model=tts_model,
+                voice=tts_voice,
+                response_format=tts_format,
+                overwrite=overwrite_audio,
+            ) if tts_backend == "openai" else synthesize_prompt_audio_qwen(
+                tts_model_handle,
+                pre_text,
+                output_path=tts_pre_path,
+                language=tts_language,
+                speaker=tts_voice,
+                instruct=tts_instruct,
+                overwrite=overwrite_audio,
+                fallback_sample_rate=sample_rate,
+            )
+            combine_audio_files(
+                tts_pre_path,
+                dataset_audio,
+                tts_post_path,
+                output_path=combined_path,
+                sample_rate=sample_rate,
+                silence_sec=silence_sec,
+                overwrite=overwrite_audio,
+                post_static_audio=tts_post_static_path if post_static_text else None,
+            )
+            followup_audio_path = combined_path
+            user_content = [
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": encode_audio_for_openai(followup_audio_path)[0],
+                        "format": encode_audio_for_openai(followup_audio_path)[1],
+                    },
+                },
+            ]
+        else:
+            followup_audio_path = tts_post_path
+            audio_b64, audio_format = encode_audio_for_openai(followup_audio_path)
+            user_content = [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": audio_b64, "format": audio_format},
+                },
+                {"type": "text", "text": pre_text},
+            ]
 
-        audio_b64, audio_format = encode_audio_for_openai(combined_path)
+        if question_format == "audio":
+            audio_b64, audio_format = encode_audio_for_openai(followup_audio_path)
+            user_content = [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": audio_b64, "format": audio_format},
+                },
+            ]
+
         messages = [
             {
                 "role": "system",
@@ -620,12 +693,7 @@ def run_followup_openai_api(
             },
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {"data": audio_b64, "format": audio_format},
-                    },
-                ],
+                "content": user_content,
             },
         ]
 
@@ -689,6 +757,7 @@ def run_followup(
     dataset_name: str,
     audio_root: Path,
     dataset_audio_field: str,
+    question_format: str,
     prompt_key: str,
     base_variant: str | None,
     logger: logging.Logger,
@@ -721,6 +790,7 @@ def run_followup(
             dataset_name=dataset_name,
             audio_root=audio_root,
             dataset_audio_field=dataset_audio_field,
+            question_format=question_format,
             prompt_key=prompt_key,
             base_variant=base_variant,
             logger=logger,
@@ -795,12 +865,18 @@ def run_followup(
             baseline_pred_letter=rec.pred_letter,
             baseline_correct=rec.correct,
         )
-        #prompt_text = ensure_last_choice(prompt_text, rec.pred_letter)
-        pre_text, post_text, post_static_text = split_prompt_for_audio(
-            prompt_text, prompt_key
-        )
+        prompt_text = ensure_last_choice(prompt_text, rec.pred_letter)
+        if question_format == "text":
+            pre_text, post_text = split_prompt_for_text_question_audio_followup(
+                prompt_text, prompt_key
+            )
+            post_static_text = ""
+        else:
+            pre_text, post_text, post_static_text = split_prompt_for_audio(
+                prompt_text, prompt_key
+            )
 
-        include_dataset_audio = dataset_name not in {"gsm8k", "mmlu"}
+        include_dataset_audio = question_format == "audio" and dataset_name not in {"gsm8k", "mmlu"}
         dataset_audio = None
         if include_dataset_audio:
             if dataset_audio_field not in sample:
@@ -839,15 +915,6 @@ def run_followup(
         if tts_backend == "openai":
             synthesize_prompt_audio_openai(
                 tts_client,
-                pre_text,
-                output_path=tts_pre_path,
-                model=tts_model,
-                voice=tts_voice,
-                response_format=tts_format,
-                overwrite=overwrite_audio,
-            )
-            synthesize_prompt_audio_openai(
-                tts_client,
                 post_text,
                 output_path=tts_post_path,
                 model=tts_model,
@@ -866,16 +933,6 @@ def run_followup(
                     overwrite=overwrite_audio,
                 )
         elif tts_backend == "qwen":
-            synthesize_prompt_audio_qwen(
-                tts_model_handle,
-                pre_text,
-                output_path=tts_pre_path,
-                language=tts_language,
-                speaker=tts_voice,
-                instruct=tts_instruct,
-                overwrite=overwrite_audio,
-                fallback_sample_rate=sample_rate,
-            )
             synthesize_prompt_audio_qwen(
                 tts_model_handle,
                 post_text,
@@ -899,21 +956,50 @@ def run_followup(
                 )
         else:
             raise ValueError(f"Unknown TTS backend: {tts_backend}")
-        combine_audio_files(
-            tts_pre_path,
-            dataset_audio,
-            tts_post_path,
-            output_path=combined_path,
-            sample_rate=sample_rate,
-            silence_sec=silence_sec,
-            overwrite=overwrite_audio,
-            post_static_audio=tts_post_static_path if post_static_text else None,
-        )
+        if question_format == "audio":
+            if tts_backend == "openai":
+                synthesize_prompt_audio_openai(
+                    tts_client,
+                    pre_text,
+                    output_path=tts_pre_path,
+                    model=tts_model,
+                    voice=tts_voice,
+                    response_format=tts_format,
+                    overwrite=overwrite_audio,
+                )
+            else:
+                synthesize_prompt_audio_qwen(
+                    tts_model_handle,
+                    pre_text,
+                    output_path=tts_pre_path,
+                    language=tts_language,
+                    speaker=tts_voice,
+                    instruct=tts_instruct,
+                    overwrite=overwrite_audio,
+                    fallback_sample_rate=sample_rate,
+                )
+            combine_audio_files(
+                tts_pre_path,
+                dataset_audio,
+                tts_post_path,
+                output_path=combined_path,
+                sample_rate=sample_rate,
+                silence_sec=silence_sec,
+                overwrite=overwrite_audio,
+                post_static_audio=tts_post_static_path if post_static_text else None,
+            )
+            followup_audio_path = combined_path
+        else:
+            followup_audio_path = tts_post_path
 
         if is_omni_model(model_id):
             if process_mm_info is None:
                 raise RuntimeError("qwen_omni_utils is not available; cannot run omni models.")
-            conversation = build_omni_audio_only_conversation(combined_path)
+            conversation = (
+                build_omni_audio_only_conversation(followup_audio_path)
+                if question_format == "audio"
+                else build_omni_conversation(followup_audio_path, pre_text)
+            )
             text = processor.apply_chat_template(
                 conversation, add_generation_prompt=True, tokenize=False
             )
@@ -934,9 +1020,13 @@ def run_followup(
             )
         else:
             audio_waveform = load_audio(
-                combined_path, sampling_rate=processor.feature_extractor.sampling_rate
+                followup_audio_path, sampling_rate=processor.feature_extractor.sampling_rate
             )
-            conversation = build_audio_only_conversation(combined_path)
+            conversation = (
+                build_audio_only_conversation(followup_audio_path)
+                if question_format == "audio"
+                else build_conversation(followup_audio_path, pre_text)
+            )
             text = processor.apply_chat_template(
                 conversation, add_generation_prompt=True, tokenize=False
             )
@@ -1008,6 +1098,7 @@ def _run_worker(
     dataset_name: str,
     audio_root: Path,
     dataset_audio_field: str,
+    question_format: str,
     prompt_key: str,
     base_variant: str | None,
     model_id: str,
@@ -1033,41 +1124,111 @@ def _run_worker(
     initial_crs_fixed: int,
     result_queue: mp.Queue,
 ) -> None:
-    if torch.cuda.is_available() and device_id is not None:
-        torch.cuda.set_device(device_id)
-    logger = setup_logger(log_path, resume=resume_log)
-    stats = run_followup(
-        records=records,
-        sample_by_id=sample_by_id,
-        dataset_name=dataset_name,
-        audio_root=audio_root,
-        dataset_audio_field=dataset_audio_field,
-        prompt_key=prompt_key,
-        base_variant=base_variant,
-        logger=logger,
-        model_id=model_id,
-        peft_path=peft_path,
-        max_gen_len=max_gen_len,
-        tts_model=tts_model,
-        tts_voice=tts_voice,
-        tts_format=tts_format,
-        tts_backend=tts_backend,
-        tts_language=tts_language,
-        tts_instruct=tts_instruct,
-        sample_rate=sample_rate,
-        silence_sec=silence_sec,
-        overwrite_audio=overwrite_audio,
-        dump_prompt_text=dump_prompt_text,
-        cache_layout=cache_layout,
-        processed_ids=processed_ids,
-        initial_total_correct=initial_total_correct,
-        initial_total_wrong=initial_total_wrong,
-        initial_mss_changed=initial_mss_changed,
-        initial_crs_fixed=initial_crs_fixed,
-        resume=bool(processed_ids),
-        device_id=device_id,
-    )
-    result_queue.put(stats)
+    try:
+        if torch.cuda.is_available() and device_id is not None:
+            torch.cuda.set_device(device_id)
+        logger = setup_logger(log_path, resume=resume_log)
+        stats = run_followup(
+            records=records,
+            sample_by_id=sample_by_id,
+            dataset_name=dataset_name,
+            audio_root=audio_root,
+            dataset_audio_field=dataset_audio_field,
+            question_format=question_format,
+            prompt_key=prompt_key,
+            base_variant=base_variant,
+            logger=logger,
+            model_id=model_id,
+            peft_path=peft_path,
+            max_gen_len=max_gen_len,
+            tts_model=tts_model,
+            tts_voice=tts_voice,
+            tts_format=tts_format,
+            tts_backend=tts_backend,
+            tts_language=tts_language,
+            tts_instruct=tts_instruct,
+            sample_rate=sample_rate,
+            silence_sec=silence_sec,
+            overwrite_audio=overwrite_audio,
+            dump_prompt_text=dump_prompt_text,
+            cache_layout=cache_layout,
+            processed_ids=processed_ids,
+            initial_total_correct=initial_total_correct,
+            initial_total_wrong=initial_total_wrong,
+            initial_mss_changed=initial_mss_changed,
+            initial_crs_fixed=initial_crs_fixed,
+            resume=bool(processed_ids),
+            device_id=device_id,
+        )
+        result_queue.put(stats)
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "__worker_error__": f"{type(exc).__name__}: {exc}",
+                "__worker_name__": mp.current_process().name,
+                "__traceback__": traceback.format_exc(),
+            }
+        )
+        raise
+
+
+def _collect_worker_results(
+    processes: List[mp.Process],
+    result_queue: mp.Queue,
+) -> Dict[str, int]:
+    aggregate = {
+        "total_correct": 0,
+        "total_wrong": 0,
+        "mss_changed": 0,
+        "crs_fixed": 0,
+    }
+    received = 0
+    try:
+        while received < len(processes):
+            try:
+                result = result_queue.get(timeout=1.0)
+            except queue.Empty:
+                failed = [
+                    f"{process.name}(exit={process.exitcode})"
+                    for process in processes
+                    if process.exitcode not in (None, 0)
+                ]
+                if failed:
+                    raise RuntimeError(
+                        "Worker process failed without returning a result: "
+                        + ", ".join(failed)
+                    )
+                if all(process.exitcode is not None for process in processes):
+                    raise RuntimeError(
+                        f"All workers exited but only {received}/{len(processes)} returned results."
+                    )
+                continue
+
+            received += 1
+            if "__worker_error__" in result:
+                raise RuntimeError(
+                    f"{result.get('__worker_name__', 'worker')} failed: "
+                    f"{result['__worker_error__']}\n{result.get('__traceback__', '')}"
+                )
+            for key in aggregate:
+                aggregate[key] += result.get(key, 0)
+    except BaseException:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        raise
+    finally:
+        for process in processes:
+            process.join(timeout=10)
+
+    failed = [
+        f"{process.name}(exit={process.exitcode})"
+        for process in processes
+        if process.exitcode != 0
+    ]
+    if failed:
+        raise RuntimeError("Worker process failed: " + ", ".join(failed))
+    return aggregate
 
 
 def parse_args() -> argparse.Namespace:
@@ -1108,7 +1269,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="Qwen/Qwen2-Audio-7B-Instruct",
-        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-4o-mini-audio-preview, vertex-gemini-2.5-flash-lite-preview-09-2025-nothinking",
+        help="Qwen/Qwen2-Audio-7B-Instruct, nvidia/audio-flamingo-3-hf, gpt-4o-mini-audio-preview, gemini-2.5-flash-lite",
     )
     parser.add_argument(
         "--peft",
@@ -1188,6 +1349,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write pre/post prompt text next to cached TTS audio.",
     )
+    parser.add_argument(
+        "--question-format",
+        type=str,
+        default="audio",
+        choices=("audio", "text"),
+        help="Whether the question/history is supplied as audio or text. In text mode, only the follow-up is synthesized to audio.",
+    )
+    parser.add_argument(
+        "--result-root",
+        type=Path,
+        default=AUDIO_SYCOPHANCY_RESULT_DIR,
+        help="Root directory for sycophancy result logs.",
+    )
     return parser.parse_args()
 
 
@@ -1251,6 +1425,8 @@ def main() -> None:
 
     prompt_key = normalize_prompt_key(args.prompt)
     log_name_parts = [dataset_cfg.name, prompt_key]
+    if args.question_format == "text":
+        log_name_parts.append("textq")
     if args.variant:
         log_name_parts.append(args.variant.replace(" ", "-"))
     elif prompt_key in {"answer_sycophancy", "mimicry_sycophancy"}:
@@ -1258,7 +1434,7 @@ def main() -> None:
 
     model_dir = model_dir_name(args.model)
     log_path = (
-        AUDIO_SYCOPHANCY_RESULT_DIR
+        args.result_root
         / model_dir
         / dataset_cfg.name
         / f"{'_'.join(log_name_parts)}.log"
@@ -1344,6 +1520,7 @@ def main() -> None:
                 dataset_name=dataset_cfg.name,
                 audio_root=audio_root,
                 dataset_audio_field=dataset_cfg.audio_field,
+                question_format=args.question_format,
                 prompt_key=prompt_key,
                 base_variant=args.variant,
                 logger=logger,
@@ -1412,6 +1589,7 @@ def main() -> None:
                     dataset_cfg.name,
                     audio_root,
                     dataset_cfg.audio_field,
+                    args.question_format,
                     prompt_key,
                     args.variant,
                     args.model,
@@ -1448,13 +1626,9 @@ def main() -> None:
             "mss_changed": prev_mss_changed,
             "crs_fixed": prev_crs_fixed,
         }
-        for _ in processes:
-            stats = result_queue.get()
-            for key in aggregate:
-                aggregate[key] += stats.get(key, 0)
-
-        for p in processes:
-            p.join()
+        worker_stats = _collect_worker_results(processes, result_queue)
+        for key in aggregate:
+            aggregate[key] += worker_stats[key]
 
         shard_logs = sorted(log_path.parent.glob(f"{log_path.stem}.api*.log"))
         for handler in aggregator_logger.handlers:
@@ -1504,6 +1678,12 @@ def main() -> None:
     if not device_ids:
         raise RuntimeError("No CUDA devices available for local models.")
 
+    # Qwen2-Audio nearly fills a 40GB card. When two GPUs are requested,
+    # keep one worker and let Transformers shard the model across both cards
+    # instead of loading a full copy in each worker.
+    if "Qwen2-Audio-7B-Instruct" in args.model and len(device_ids) > 1:
+        device_ids = [None]
+
     if len(device_ids) == 1:
         logger = setup_logger(log_path, resume=resume_logging)
         logger.info(
@@ -1531,6 +1711,7 @@ def main() -> None:
             dataset_name=dataset_cfg.name,
             audio_root=audio_root,
             dataset_audio_field=dataset_cfg.audio_field,
+            question_format=args.question_format,
             prompt_key=prompt_key,
             base_variant=args.variant,
             logger=logger,
@@ -1582,6 +1763,7 @@ def main() -> None:
                 dataset_cfg.name,
                 audio_root,
                 dataset_cfg.audio_field,
+                args.question_format,
                 prompt_key,
                 args.variant,
                 args.model,
@@ -1636,13 +1818,9 @@ def main() -> None:
         "mss_changed": prev_mss_changed,
         "crs_fixed": prev_crs_fixed,
     }
-    for _ in processes:
-        stats = result_queue.get()
-        for key in aggregate:
-            aggregate[key] += stats.get(key, 0)
-
-    for p in processes:
-        p.join()
+    worker_stats = _collect_worker_results(processes, result_queue)
+    for key in aggregate:
+        aggregate[key] += worker_stats[key]
 
     shard_logs = sorted(log_path.parent.glob(f"{log_path.stem}.gpu*.log"))
     for handler in aggregator_logger.handlers:

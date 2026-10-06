@@ -1,3 +1,0 @@
-2025-12-30 13:46:51 | INFO | Launched 4 API workers; per-worker logs at /home/junchi.yao/ICML2026-ALM/result/sycophancy/gpt-audio-mini/mmar_mimicry_sycophancy_auto.log.api<id>.log
-2025-12-30 13:47:44 | INFO | Launched 4 API workers; per-worker logs at /home/junchi.yao/ICML2026-ALM/result/sycophancy/gpt-audio-mini/mmar_mimicry_sycophancy_auto.log.api<id>.log
-2025-12-30 13:47:44 | INFO | Resuming: skipped 12 samples already logged (seen=12, baseline_correct=8, baseline_wrong=4, mss_changed=1, crs_fixed=2)

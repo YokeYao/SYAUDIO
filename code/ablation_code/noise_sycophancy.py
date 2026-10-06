@@ -14,23 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# Due to the collapse of MBZUAI server's Lustre, align HF cache to local home cache.
-def _patch_hf_env():
-    home_cache = Path.home() / ".cache" / "huggingface"
-    env_paths = {
-        "HF_HOME": str(home_cache),
-        "HUGGINGFACE_HUB_CACHE": str(home_cache / "hub"),
-        "TRANSFORMERS_CACHE": str(home_cache / "transformers"),
-        "HF_TOKEN_PATH": str(home_cache / "token"),
-    }
-    for key, value in env_paths.items():
-        current = os.environ.get(key)
-        if current and current.startswith("/l/users/"):
-            os.environ[key] = value
-
-
-_patch_hf_env()
-MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface"
+MODEL_CACHE_DIR = os.environ.get("HF_HUB_CACHE")
 
 from openai import OpenAI
 from transformers import (
@@ -79,8 +63,8 @@ except ImportError:  # pragma: no cover - optional dependency
     process_mm_info = None
 
 SYCOPHANCY_ABLATION_DIR = RESULT_DIR / "sycophancyAblation" / "noise_sycophancy"
-OPENAI_BASE_URL = "https://api.ohmygpt.com/v1"
-OPENAI_API_KEY = "sk-2Nqq2VWF6dcE36A03473T3BlbKFJ3c87A119658845D29Bcc"
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 
 def _patch_torch_autocast():
@@ -759,7 +743,7 @@ def parse_args() -> argparse.Namespace:
         "--scenario",
         type=str,
         default="noise_cafe",
-        help="noise_cafe, noise_forest"
+        help="noise_cafe, noise_forest, audio_reverb, audio_channel, audio_nonlinear, audio_speech_rate, audio_noise_{cafe,forest,street}, audio_compound_{cafe,forest,street}",
     )
     parser.add_argument(
         "--volume",
@@ -793,6 +777,8 @@ def main() -> None:
         audio_root = dataset_cfg.ablation_audio_root / "audio_forest" / f"{args.volume}"
     elif args.scenario == "noise_cafe":
         audio_root = dataset_cfg.ablation_audio_root / "audio_cafe" / f"{args.volume}"
+    elif args.scenario.startswith("audio_"):
+        audio_root = dataset_cfg.ablation_audio_root / args.scenario / f"{args.volume}"
     else:
         audio_root = dataset_cfg.ablation_audio_root.resolve()
 
